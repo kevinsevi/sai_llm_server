@@ -9,6 +9,7 @@ from litellm import CustomLLM, ModelResponse
 from litellm.types.utils import GenericStreamingChunk
 import logging
 from logging.handlers import RotatingFileHandler
+from sai_models import is_valid_model  # Importar validación de modelos
 
 # Cargar variables de entorno
 load_dotenv()
@@ -17,7 +18,7 @@ load_dotenv()
 log_dir = "logs"
 os.makedirs(log_dir, exist_ok=True)
 
-logger = logging.getLogger("sai_handler_llm")
+logger = logging.getLogger("sai_handler")
 
 file_handler = RotatingFileHandler(
     filename=os.path.join(log_dir, "sai_handler.log"),
@@ -445,7 +446,7 @@ class SAILLM(CustomLLM):
 
         prompt = messages[-1]["content"]
         response_text, finish_reason, usage_data = self._call_sai(
-            system, prompt, chat_messages, request_id, user_api_key=user_api_key
+            system, prompt, chat_messages, request_id, user_api_key=user_api_key, model=kwargs.get('model')
         )
 
         # Crear ModelResponse condicionalmente según user-agent
@@ -502,6 +503,9 @@ class SAILLM(CustomLLM):
         # Extraer user-agent si existe
         user_agent = self._extract_user_agent(kwargs, request_id)
 
+        # Extraer model si existe
+        model = kwargs.get('model')
+
         system, chat_messages = self._prepare_messages(messages, request_id)
 
         if not messages:
@@ -510,13 +514,13 @@ class SAILLM(CustomLLM):
         prompt = messages[-1]["content"]
         loop = asyncio.get_running_loop()
 
-        # Crear una función parcial que incluya user_api_key
+        # Crear una función parcial que incluya user_api_key y model
         from functools import partial
-        call_sai_with_key = partial(self._call_sai, user_api_key=user_api_key)
+        call_sai_with_params = partial(self._call_sai, user_api_key=user_api_key, model=model)
 
         response_text, finish_reason, usage_data = await loop.run_in_executor(
             None,
-            call_sai_with_key,
+            call_sai_with_params,
             system,
             prompt,
             chat_messages,
@@ -570,9 +574,24 @@ class SAILLM(CustomLLM):
 
         # Pasar el request_id y todos los kwargs a acompletion
         kwargs['_request_id'] = request_id
+
         response = await self.acompletion(messages, **kwargs)
-        text = response.text
+
+        # BUGFIX: Extraer texto de response (puede estar en .text o en .choices[0].message.content)
+        text = None
+        if hasattr(response, 'text') and response.text:
+            text = response.text
+        elif hasattr(response, 'choices') and response.choices:
+            choice = response.choices[0]
+            if hasattr(choice, 'message') and hasattr(choice.message, 'content'):
+                text = choice.message.content
+
+        if not text:
+            logger.error(f"❌ [{request_id}] [STREAMING] No se pudo extraer texto de la respuesta")
+            return
+
         usage_dict = response.usage.__dict__ if not isinstance(response.usage, dict) else response.usage
+
         finish_reason = response.choices[0].finish_reason
 
         for idx, start in enumerate(range(0, len(text), CHUNK_SIZE)):
@@ -714,7 +733,7 @@ class SAILLM(CustomLLM):
                 "Si el problema persiste, contacte al administrador del sistema."
             )
 
-    def _handle_error_response(self, response: Optional[str], auth_method_used: str, 
+    def _handle_error_response(self, response: Optional[str], auth_method_used: str,
                                request_id: str, chat_messages: list, url: str) -> Optional[tuple[str, str, dict]]:
         """
         Maneja respuestas de error y retorna el mensaje apropiado.
@@ -826,7 +845,7 @@ class SAILLM(CustomLLM):
         )
 
     # ---------------- Métodos auxiliares para _make_request ----------------
-    def _setup_request_headers(self, use_api_key: bool, custom_api_key: Optional[str], 
+    def _setup_request_headers(self, use_api_key: bool, custom_api_key: Optional[str],
                                custom_cookie: Optional[str], request_id: str) -> tuple[dict, str]:
         """
         Configura los headers de autenticación para la petición.
@@ -881,7 +900,7 @@ class SAILLM(CustomLLM):
                 f"{data.get('chatMessages', [])}"
             )
 
-    def _execute_http_request(self, url: str, data: dict, headers: dict, 
+    def _execute_http_request(self, url: str, data: dict, headers: dict,
                              request_timeout: int, request_id: str):
         """
         Ejecuta la petición HTTP POST.
@@ -996,7 +1015,7 @@ class SAILLM(CustomLLM):
         )
         return None, None
 
-    def _handle_request_exceptions(self, e: Exception, resp, auth_method: str, url: str, 
+    def _handle_request_exceptions(self, e: Exception, resp, auth_method: str, url: str,
                                    request_timeout: int, request_id: str) -> tuple[Optional[str], Optional[dict]]:
         """
         Maneja todas las excepciones que pueden ocurrir durante una petición HTTP.
@@ -1041,8 +1060,19 @@ class SAILLM(CustomLLM):
         return None, None
 
     # ---------------- Llamada privada a SAI (refactorizada) ----------------
-    def _call_sai(self, system: str, user: str, chat_messages: list, request_id: str, user_api_key: Optional[str] = None) -> tuple[str, str, dict]:
+    def _call_sai(self, system: str, user: str, chat_messages: list, request_id: str, user_api_key: Optional[str] = None, model: Optional[str] = None) -> tuple[str, str, dict]:
+        # Construir URL base
         url = f"{SAI_URL}/api/templates/{SAI_TEMPLATE_ID}/execute"
+        
+        # Agregar modelOverride si se proporciona un modelo
+        if model:
+            url = f"{url}?modelOverride={model}"
+            logger.info(
+                f"🎯 [{request_id}] [MODEL] Model override aplicado | "
+                f"Modelo solicitado: {model} | "
+                f"URL: {url}"
+            )
+        
         data = {"inputs":{"system":system,"user":user}}
         if chat_messages:
             data["chatMessages"] = chat_messages
