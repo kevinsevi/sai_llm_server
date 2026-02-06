@@ -1,6 +1,5 @@
-# sai_gateway.py
 """
-Gateway FastAPI para exponer SAI con APIs compatibles con OpenAI.
+sai_gateway.py - Gateway FastAPI para exponer SAI con APIs compatibles con OpenAI.
 
 Este servidor proporciona múltiples endpoints compatibles con diferentes
 formatos de la API de OpenAI:
