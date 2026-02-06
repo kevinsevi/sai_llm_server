@@ -1,40 +1,62 @@
+# sai_gateway.py
 """
-Gateway para exponer SAI con API compatible con OpenAI.
+Gateway FastAPI para exponer SAI con APIs compatibles con OpenAI.
 
-Este servidor proporciona:
-- /v1/messages (sin streaming) - OpenaAI Messages API format
-- /v1/responses (con streaming SSE) - OpenAI Responses API format
-- /v1/chat/completions (OpenAI compatible) - Chat Completions API format
+Este servidor proporciona múltiples endpoints compatibles con diferentes
+formatos de la API de OpenAI:
 
-FIX v1.0.4: El verdadero problema era el nombre del evento final. OpenAI
-            Responses API usa 'response.done', no 'response.completed'.
-            Codex CLI seguía la especificación correctamente.
+Endpoints principales:
+- POST /v1/completions: OpenAI Completions API (legacy) con soporte streaming
+- POST /v1/chat/completions: OpenAI Chat Completions API con soporte streaming
+- POST /v1/messages: OpenAI Messages API (sin streaming)
+- POST /v1/responses: OpenAI Responses API con streaming SSE (compatible con Codex CLI)
+- GET /v1/models: Lista de modelos disponibles
+- GET /v1/models/{model_id}: Detalles de un modelo específico
+- GET /health: Health check
+
+Características:
+- Todos los endpoints funcionan con o sin el prefijo /v1
+- Autenticación vía Authorization header (Bearer token) o x-api-key header
+- Conversión automática entre formatos OpenAI y LiteLLM
+- Logging detallado con request_id para trazabilidad
+- Manejo robusto de errores con HTTPException
+
+Versión: 1.0.4
 """
 
 import json
-import time
 import uuid
-from typing import AsyncIterator
 from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.responses import JSONResponse
 import uvicorn
-import logging
 
-# Importar tu clase SAILLM existente
-from sai_handler import sai_llm, logger, VERBOSE_LOGGING
+from sai_handler import sai_llm, logger, converter
 from sai_models import get_models_list, get_model_by_id
 
 app = FastAPI(title="OpenAI SAI Gateway", version="1.0.4")
 
 def _normalize_bool(value) -> bool:
     """
-    Normaliza un valor a booleano, manejando strings "true"/"false".
+    Normaliza un valor a booleano.
     
+    Maneja múltiples tipos de entrada y convierte strings como "true"/"false"
+    a sus equivalentes booleanos.
+
     Args:
-        value: Puede ser bool, str, int, None
+        value: Valor a normalizar. Puede ser bool, str, int o None.
         
     Returns:
-        bool: Valor normalizado
+        bool: Valor normalizado a booleano.
+        
+    Examples:
+        >>> _normalize_bool(True)
+        True
+        >>> _normalize_bool("true")
+        True
+        >>> _normalize_bool("1")
+        True
+        >>> _normalize_bool(0)
+        False
     """
     if isinstance(value, bool):
         return value
@@ -44,197 +66,34 @@ def _normalize_bool(value) -> bool:
         return value != 0
     return False
 
-# Logger específico del gateway
-
-class OpenAiSAIConverter:
-    """Convierte entre formatos de API de OpenAI y SAI."""
-
-    @staticmethod
-    def _extract_text_recursive(content) -> str:
-        """
-        Extrae texto de estructuras anidadas recursivamente.
-
-        Maneja:
-        - Strings simples: "hola"
-        - Listas de content blocks: [{"type": "text", "text": "hola"}]
-        - Listas anidadas complejas (Codex CLI): [{"type": "message", "content": [...]}]
-
-        Args:
-            content: Puede ser str, list, dict o cualquier combinación anidada
-
-        Returns:
-            str: Texto extraído y concatenado
-        """
-        # Caso 1: Ya es un string
-        if isinstance(content, str):
-            return content
-
-        # Caso 2: Es una lista
-        if isinstance(content, list):
-            texts = []
-            for item in content:
-                # Recursión para cada elemento de la lista
-                extracted = OpenAiSAIConverter._extract_text_recursive(item)
-                if extracted:
-                    texts.append(extracted)
-            return " ".join(texts)
-
-        # Caso 3: Es un diccionario
-        if isinstance(content, dict):
-            # Prioridad 1: Si tiene "text", usarlo directamente
-            if "text" in content:
-                return str(content["text"])
-
-            # Prioridad 2: Si tiene "content", recursión
-            if "content" in content:
-                return OpenAiSAIConverter._extract_text_recursive(content["content"])
-
-            # Prioridad 3: Si tiene "input_text" (formato Codex CLI)
-            if "input_text" in content:
-                return str(content["input_text"])
-
-            # Si no tiene ninguno de los campos esperados, retornar vacío
-            return ""
-
-        # Caso 4: Otro tipo (None, int, etc.)
-        return ""
-
-    @staticmethod
-    def openai_to_litellm(openai_request: dict) -> tuple[list, dict]:
-        """
-        Convierte request de OpenAI Messages API a formato LiteLLM.
-
-        Args:
-            openai_request: Request en formato OpenAI
-
-        Returns:
-            tuple: (messages, kwargs_for_litellm)
-        """
-        messages = []
-
-        # Extraer system prompt si existe
-        system_prompt = openai_request.get("system", "")
-        if system_prompt:
-            system_text = OpenAiSAIConverter._extract_text_recursive(system_prompt)
-            if system_text:
-                messages.append({
-                    "role": "system",
-                    "content": system_text
-                })
-
-        # Convertir mensajes
-        for msg in openai_request.get("messages", []):
-            role = msg.get("role")
-            content = msg.get("content")
-
-            # Usar extracción recursiva para manejar cualquier nivel de anidación
-            text_content = OpenAiSAIConverter._extract_text_recursive(content)
-
-            # Solo agregar si hay contenido real
-            if text_content:
-                messages.append({
-                    "role": role,
-                    "content": text_content
-                })
-
-        # Preparar kwargs para LiteLLM
-        kwargs = {
-            "model": openai_request.get("model", "claude-sonnet-4-5-20250929"),
-            "temperature": openai_request.get("temperature"),
-            "max_tokens": openai_request.get("max_tokens", 4096),
-            "top_p": openai_request.get("top_p"),
-            "top_k": openai_request.get("top_k"),
-            "stop_sequences": openai_request.get("stop_sequences"),
-        }
-
-        # Filtrar None values
-        kwargs = {k: v for k, v in kwargs.items() if v is not None}
-
-        # Extraer metadata adicional si existe
-        metadata = openai_request.get("metadata", {})
-        if metadata:
-            kwargs["litellm_params"] = {
-                "metadata": metadata
-            }
-
-        return messages, kwargs
-
-    @staticmethod
-    def litellm_to_openai_response(litellm_response, model: str, request_id: str) -> dict:
-        """
-        Convierte respuesta de LiteLLM a formato OpenAI Messages.
-
-        Args:
-            litellm_response: Respuesta de sai_llm.acompletion()
-            model: Modelo usado
-            request_id: ID de la solicitud
-
-        Returns:
-            dict: Respuesta en formato OpenAI
-        """
-        # Extraer texto de la respuesta
-        text = ""
-        if hasattr(litellm_response, 'text') and litellm_response.text:
-            text = litellm_response.text
-        elif hasattr(litellm_response, 'choices') and litellm_response.choices:
-            choice = litellm_response.choices[0]
-            if hasattr(choice, 'message') and hasattr(choice.message, 'content'):
-                text = choice.message.content or ""
-
-        # Extraer usage
-        usage_dict = {}
-        if hasattr(litellm_response, 'usage'):
-            usage_obj = litellm_response.usage
-            if isinstance(usage_obj, dict):
-                usage_dict = usage_obj
-            else:
-                usage_dict = usage_obj.__dict__ if hasattr(usage_obj, '__dict__') else {}
-
-        # Extraer finish_reason
-        finish_reason = "end_turn"
-        if hasattr(litellm_response, 'choices') and litellm_response.choices:
-            choice = litellm_response.choices[0]
-            if hasattr(choice, 'finish_reason'):
-                litellm_finish = choice.finish_reason
-                # Mapear finish_reason de LiteLLM a OpenAI
-                finish_reason_map = {
-                    "stop": "end_turn",
-                    "length": "max_tokens",
-                    "error": "error"
-                }
-                finish_reason = finish_reason_map.get(litellm_finish, "end_turn")
-
-        return {
-            "id": f"msg_{request_id}",
-            "type": "message",
-            "role": "assistant",
-            "content": [
-                {
-                    "type": "text",
-                    "text": text
-                }
-            ],
-            "model": model,
-            "stop_reason": finish_reason,
-            "stop_sequence": None,
-            "usage": {
-                "input_tokens": usage_dict.get("prompt_tokens", 0),
-                "output_tokens": usage_dict.get("completion_tokens", 0)
-            }
-        }
-
 
 @app.post("/v1/completions")
 @app.post("/completions")
 async def completions_endpoint(request: Request):
     """
     Endpoint compatible con OpenAI Completions API (legacy).
-    Reutiliza la lógica de sai_handler.py para mantener consistencia.
+    
+    Acepta un prompt simple y retorna una completion. Soporta tanto
+    modo streaming como no streaming.
 
-    Este endpoint soporta:
-    - Formato de prompt simple (string)
-    - Streaming y no streaming
-    - Autenticación vía headers
+    Request Body:
+        prompt (str): Texto del prompt
+        stream (bool, optional): Si es True, retorna streaming SSE. Default: False
+        model (str, optional): ID del modelo. Default: "claude-sonnet-4-5-20250929"
+        max_tokens (int, optional): Máximo de tokens a generar. Default: 4096
+        temperature (float, optional): Temperatura de sampling
+        top_p (float, optional): Nucleus sampling
+        stop (str|list, optional): Secuencias de parada
+
+    Headers:
+        Authorization: Bearer token (opcional)
+        x-api-key: API key alternativa (opcional)
+
+    Returns:
+        JSONResponse o StreamingResponse: Completion en formato OpenAI
+        
+    Raises:
+        HTTPException: 400 si falta el prompt, 500 en errores internos
     """
     request_id = str(uuid.uuid4())[:8]
 
@@ -303,10 +162,10 @@ async def completions_endpoint(request: Request):
         # Decidir si es streaming o no
         if stream:
             logger.info(f"🌊 [{request_id}] Modo streaming activado")
-            return await _completions_streaming(request_id, messages, kwargs, model)
+            return await converter._completions_streaming(request_id, messages, kwargs, model)
         else:
             logger.info(f"📄 [{request_id}] Modo sin streaming")
-            return await _completions_non_streaming(request_id, messages, kwargs, model)
+            return await converter._completions_non_streaming(request_id, messages, kwargs, model)
 
     except HTTPException:
         raise
@@ -315,158 +174,33 @@ async def completions_endpoint(request: Request):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-async def _completions_non_streaming(request_id: str, messages: list, kwargs: dict, model: str):
-    """Maneja completions sin streaming (reutiliza sai_handler.py)."""
-    logger.info(f"🚀 [{request_id}] Llamando a sai_llm.acompletion()...")
-    litellm_response = await sai_llm.acompletion(messages=messages, **kwargs)
-
-    # Extraer texto
-    text = ""
-    if hasattr(litellm_response, 'text') and litellm_response.text:
-        text = litellm_response.text
-    elif hasattr(litellm_response, 'choices') and litellm_response.choices:
-        choice = litellm_response.choices[0]
-        if hasattr(choice, 'message') and hasattr(choice.message, 'content'):
-            text = choice.message.content or ""
-
-    # Extraer usage
-    usage_dict = {}
-    if hasattr(litellm_response, 'usage'):
-        usage_obj = litellm_response.usage
-        if isinstance(usage_obj, dict):
-            usage_dict = usage_obj
-        else:
-            usage_dict = usage_obj.__dict__ if hasattr(usage_obj, '__dict__') else {}
-
-    # Extraer finish_reason
-    finish_reason = "stop"
-    if hasattr(litellm_response, 'choices') and litellm_response.choices:
-        choice = litellm_response.choices[0]
-        if hasattr(choice, 'finish_reason'):
-            finish_reason = choice.finish_reason or "stop"
-
-    # Construir respuesta en formato OpenAI Completions
-    openai_response = {
-        "id": f"cmpl-{request_id}",
-        "object": "text_completion",
-        "created": int(time.time()),
-        "model": model,
-        "choices": [
-            {
-                "text": text,
-                "index": 0,
-                "logprobs": None,
-                "finish_reason": finish_reason
-            }
-        ],
-        "usage": {
-            "prompt_tokens": usage_dict.get("prompt_tokens", 0),
-            "completion_tokens": usage_dict.get("completion_tokens", 0),
-            "total_tokens": usage_dict.get("total_tokens", 0)
-        }
-    }
-
-    logger.info(
-        f"✅ [{request_id}] Respuesta lista | "
-        f"Output tokens: {usage_dict.get('completion_tokens', 0)}"
-    )
-
-    return JSONResponse(content=openai_response)
-
-
-async def _completions_streaming(request_id: str, messages: list, kwargs: dict, model: str):
-    """Maneja completions con streaming (reutiliza sai_handler.py)."""
-    async def event_generator():
-        try:
-            logger.info(f"🌊 [{request_id}] Iniciando streaming...")
-
-            # Llamar a SAI streaming (reutiliza sai_handler.py)
-            logger.info(f"🚀 [{request_id}] Llamando a sai_llm.astreaming()...")
-
-            chunk_count = 0
-
-            async for chunk in sai_llm.astreaming(messages=messages, **kwargs):
-                chunk_count += 1
-
-                if chunk_count == 1:
-                    logger.warning(f"⏱️ [{request_id}] PRIMER CHUNK recibido")
-
-                # Extraer texto del chunk
-                chunk_text = chunk.get('text') if isinstance(chunk, dict) else getattr(chunk, 'text', None)
-
-                if chunk_text:
-                    # Chunk de contenido en formato Completions
-                    content_chunk = {
-                        "id": f"cmpl-{request_id}",
-                        "object": "text_completion",
-                        "created": int(time.time()),
-                        "model": model,
-                        "choices": [
-                            {
-                                "text": chunk_text,
-                                "index": 0,
-                                "logprobs": None,
-                                "finish_reason": None
-                            }
-                        ]
-                    }
-                    yield f"data: {json.dumps(content_chunk)}\n\n"
-
-                # Verificar si es el último chunk
-                is_finished = chunk.get('is_finished') if isinstance(chunk, dict) else getattr(chunk, 'is_finished', False)
-                if is_finished:
-                    finish_reason = chunk.get('finish_reason') if isinstance(chunk, dict) else getattr(chunk, 'finish_reason', 'stop')
-
-                    # Chunk final
-                    final_chunk = {
-                        "id": f"cmpl-{request_id}",
-                        "object": "text_completion",
-                        "created": int(time.time()),
-                        "model": model,
-                        "choices": [
-                            {
-                                "text": "",
-                                "index": 0,
-                                "logprobs": None,
-                                "finish_reason": finish_reason or "stop"
-                            }
-                        ]
-                    }
-                    yield f"data: {json.dumps(final_chunk)}\n\n"
-
-            # Enviar [DONE]
-            yield "data: [DONE]\n\n"
-
-            logger.info(f"✅ [{request_id}] Streaming completado | Chunks: {chunk_count}")
-
-        except Exception as e:
-            logger.error(f"❌ [{request_id}] Error en streaming: {type(e).__name__}: {str(e)}")
-            error_chunk = {
-                "error": {
-                    "message": str(e),
-                    "type": "internal_error"
-                }
-            }
-            yield f"data: {json.dumps(error_chunk)}\n\n"
-
-    return StreamingResponse(
-        event_generator(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-            "Transfer-Encoding": "chunked"
-        }
-    )
-
-
 @app.post("/v1/chat/completions")
 @app.post("/chat/completions")
 async def chat_completions_endpoint(request: Request):
     """
     Endpoint compatible con OpenAI Chat Completions API.
-    Reutiliza la lógica de messages_endpoint y responses_endpoint.
+    
+    Acepta una lista de mensajes en formato chat y retorna una completion.
+    Soporta tanto modo streaming como no streaming.
+
+    Request Body:
+        messages (list): Lista de mensajes con 'role' y 'content'
+        stream (bool, optional): Si es True, retorna streaming SSE. Default: False
+        model (str, optional): ID del modelo. Default: "claude-sonnet-4-5-20250929"
+        max_tokens (int, optional): Máximo de tokens a generar. Default: 4096
+        temperature (float, optional): Temperatura de sampling
+        top_p (float, optional): Nucleus sampling
+        stop (str|list, optional): Secuencias de parada
+
+    Headers:
+        Authorization: Bearer token (opcional)
+        x-api-key: API key alternativa (opcional)
+
+    Returns:
+        JSONResponse o StreamingResponse: Chat completion en formato OpenAI
+        
+    Raises:
+        HTTPException: 400 si falta messages, 500 en errores internos
     """
     request_id = str(uuid.uuid4())[:8]
 
@@ -508,7 +242,7 @@ async def chat_completions_endpoint(request: Request):
             "stop": body.get("stop")
         }
 
-        messages, kwargs = OpenAiSAIConverter.openai_to_litellm(openai_body)
+        messages, kwargs = converter.openai_to_litellm(openai_body)
 
         # Extraer user_api_key si viene en headers
         user_api_key = request.headers.get("authorization", "").replace("Bearer ", "").strip()
@@ -522,10 +256,10 @@ async def chat_completions_endpoint(request: Request):
         # Decidir si es streaming o no
         if stream:
             logger.info(f"🌊 [{request_id}] Modo streaming activado")
-            return await _chat_completions_streaming(request_id, messages, kwargs, model)
+            return await converter._chat_completions_streaming(request_id, messages, kwargs, model)
         else:
             logger.info(f"📄 [{request_id}] Modo sin streaming")
-            return await _chat_completions_non_streaming(request_id, messages, kwargs, model)
+            return await converter._chat_completions_non_streaming(request_id, messages, kwargs, model)
 
     except HTTPException:
         raise
@@ -534,184 +268,33 @@ async def chat_completions_endpoint(request: Request):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-async def _chat_completions_non_streaming(request_id: str, messages: list, kwargs: dict, model: str):
-    """Maneja chat completions sin streaming."""
-    logger.info(f"🚀 [{request_id}] Llamando a sai_llm.acompletion()...")
-    litellm_response = await sai_llm.acompletion(messages=messages, **kwargs)
-
-    # Extraer texto
-    text = ""
-    if hasattr(litellm_response, 'text') and litellm_response.text:
-        text = litellm_response.text
-    elif hasattr(litellm_response, 'choices') and litellm_response.choices:
-        choice = litellm_response.choices[0]
-        if hasattr(choice, 'message') and hasattr(choice.message, 'content'):
-            text = choice.message.content or ""
-
-    # Extraer usage
-    usage_dict = {}
-    if hasattr(litellm_response, 'usage'):
-        usage_obj = litellm_response.usage
-        if isinstance(usage_obj, dict):
-            usage_dict = usage_obj
-        else:
-            usage_dict = usage_obj.__dict__ if hasattr(usage_obj, '__dict__') else {}
-
-    # Extraer finish_reason
-    finish_reason = "stop"
-    if hasattr(litellm_response, 'choices') and litellm_response.choices:
-        choice = litellm_response.choices[0]
-        if hasattr(choice, 'finish_reason'):
-            finish_reason = choice.finish_reason or "stop"
-
-    # Construir respuesta en formato OpenAI
-    openai_response = {
-        "id": f"chatcmpl-{request_id}",
-        "object": "chat.completion",
-        "created": int(time.time()),
-        "model": model,
-        "choices": [
-            {
-                "index": 0,
-                "message": {
-                    "role": "assistant",
-                    "content": text
-                },
-                "finish_reason": finish_reason
-            }
-        ],
-        "usage": {
-            "prompt_tokens": usage_dict.get("prompt_tokens", 0),
-            "completion_tokens": usage_dict.get("completion_tokens", 0),
-            "total_tokens": usage_dict.get("total_tokens", 0)
-        }
-    }
-
-    logger.info(
-        f"✅ [{request_id}] Respuesta lista | "
-        f"Output tokens: {usage_dict.get('completion_tokens', 0)}"
-    )
-
-    return JSONResponse(content=openai_response)
-
-
-async def _chat_completions_streaming(request_id: str, messages: list, kwargs: dict, model: str):
-    """Maneja chat completions con streaming."""
-    async def event_generator():
-        try:
-            logger.info(f"🌊 [{request_id}] Iniciando streaming...")
-
-            # Chunk inicial
-            initial_chunk = {
-                "id": f"chatcmpl-{request_id}",
-                "object": "chat.completion.chunk",
-                "created": int(time.time()),
-                "model": model,
-                "choices": [
-                    {
-                        "index": 0,
-                        "delta": {"role": "assistant"},
-                        "finish_reason": None
-                    }
-                ]
-            }
-            yield f"data: {json.dumps(initial_chunk)}\n\n"
-
-            # Llamar a SAI streaming
-            logger.info(f"🚀 [{request_id}] Llamando a sai_llm.astreaming()...")
-
-            chunk_count = 0
-            total_tokens = 0
-            input_tokens = 0
-            output_tokens = 0
-
-            async for chunk in sai_llm.astreaming(messages=messages, **kwargs):
-                chunk_count += 1
-
-                if chunk_count == 1:
-                    logger.warning(f"⏱️ [{request_id}] PRIMER CHUNK recibido")
-
-                # Extraer texto del chunk
-                chunk_text = chunk.get('text') if isinstance(chunk, dict) else getattr(chunk, 'text', None)
-
-                if chunk_text:
-                    # Chunk de contenido
-                    content_chunk = {
-                        "id": f"chatcmpl-{request_id}",
-                        "object": "chat.completion.chunk",
-                        "created": int(time.time()),
-                        "model": model,
-                        "choices": [
-                            {
-                                "index": 0,
-                                "delta": {"content": chunk_text},
-                                "finish_reason": None
-                            }
-                        ]
-                    }
-                    yield f"data: {json.dumps(content_chunk)}\n\n"
-
-                # Extraer usage
-                usage = chunk.get('usage') if isinstance(chunk, dict) else getattr(chunk, 'usage', None)
-                if usage:
-                    if isinstance(usage, dict):
-                        input_tokens = usage.get("prompt_tokens", 0) or input_tokens
-                        output_tokens = usage.get("completion_tokens", 0) or output_tokens
-                        total_tokens = usage.get("total_tokens", 0) or total_tokens
-
-                # Verificar si es el último chunk
-                is_finished = chunk.get('is_finished') if isinstance(chunk, dict) else getattr(chunk, 'is_finished', False)
-                if is_finished:
-                    finish_reason = chunk.get('finish_reason') if isinstance(chunk, dict) else getattr(chunk, 'finish_reason', 'stop')
-
-                    # Chunk final
-                    final_chunk = {
-                        "id": f"chatcmpl-{request_id}",
-                        "object": "chat.completion.chunk",
-                        "created": int(time.time()),
-                        "model": model,
-                        "choices": [
-                            {
-                                "index": 0,
-                                "delta": {},
-                                "finish_reason": finish_reason or "stop"
-                            }
-                        ]
-                    }
-                    yield f"data: {json.dumps(final_chunk)}\n\n"
-
-            # Enviar [DONE]
-            yield "data: [DONE]\n\n"
-
-            logger.info(f"✅ [{request_id}] Streaming completado | Chunks: {chunk_count}")
-
-        except Exception as e:
-            logger.error(f"❌ [{request_id}] Error en streaming: {type(e).__name__}: {str(e)}")
-            error_chunk = {
-                "error": {
-                    "message": str(e),
-                    "type": "internal_error"
-                }
-            }
-            yield f"data: {json.dumps(error_chunk)}\n\n"
-
-    return StreamingResponse(
-        event_generator(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-            "Transfer-Encoding": "chunked"
-        }
-    )
-
-
 @app.post("/v1/messages")
 @app.post("/messages")
 async def messages_endpoint(request: Request):
     """
     Endpoint compatible con OpenAI Messages API (sin streaming).
+    
+    Acepta mensajes en formato OpenAI y retorna una respuesta completa
+    sin streaming. Si necesitas streaming, usa /v1/responses.
+
+    Request Body:
+        messages (list): Lista de mensajes con 'role' y 'content'
+        input (str, optional): Alternativa a messages para prompt simple
+        model (str, optional): ID del modelo
+        max_tokens (int, optional): Máximo de tokens a generar
+        temperature (float, optional): Temperatura de sampling
+        top_p (float, optional): Nucleus sampling
+
+    Headers:
+        Authorization: Bearer token (opcional)
+        x-api-key: API key alternativa (opcional)
+
+    Returns:
+        JSONResponse: Respuesta completa en formato OpenAI Messages
+        
+    Raises:
+        HTTPException: 400 si falta messages/input o si pide streaming,
+                      500 en errores internos
     """
     request_id = str(uuid.uuid4())[:8]
 
@@ -752,7 +335,7 @@ async def messages_endpoint(request: Request):
         logger.info(f"📊 [{request_id}] Model: {body.get('model', 'N/A')} | Messages: {len(body.get('messages', []))}")
 
         # Convertir request de OpenAI a LiteLLM
-        messages, kwargs = OpenAiSAIConverter.openai_to_litellm(body)
+        messages, kwargs = converter.openai_to_litellm(body)
 
         logger.info(
             f"🔄 [{request_id}] Convertido a formato LiteLLM | "
@@ -776,7 +359,7 @@ async def messages_endpoint(request: Request):
 
         # Convertir respuesta a formato OpenAI
         model = body.get("model")
-        openai_response = OpenAiSAIConverter.litellm_to_openai_response(
+        openai_response = converter.litellm_to_openai_response(
             litellm_response, model, request_id
         )
 
@@ -800,17 +383,38 @@ async def messages_endpoint(request: Request):
 async def responses_endpoint(request: Request):
     """
     Endpoint compatible con OpenAI Responses API (con streaming SSE).
+    
+    Implementa el formato oficial de OpenAI Responses API utilizado por
+    herramientas como Codex CLI. Emite eventos SSE durante el streaming.
 
-    Este endpoint implementa el formato oficial de OpenAI Responses API
-    que es utilizado por Codex CLI. Eventos clave:
-    - response.created: Inicio del response
-    - response.output_text.delta: Deltas de texto
-    - response.output_item.done: Item completado
-    - response.done: Response finalizado (NOT response.completed)
+    Eventos SSE emitidos:
+        - response.created: Inicio del response
+        - response.output_text.delta: Deltas de texto incrementales
+        - response.output_item.done: Item de salida completado
+        - response.done: Response finalizado (evento final correcto según spec)
 
-    FIX v1.0.4: El evento final correcto según la especificación oficial
-    de OpenAI es 'response.done', no 'response.completed'. Este era el
-    problema que causaba los reintentos.
+    Request Body:
+        messages (list): Lista de mensajes con 'role' y 'content'
+        input (str, optional): Alternativa a messages para prompt simple
+        stream (bool, optional): Si es True, retorna streaming SSE. Default: False
+        model (str, optional): ID del modelo
+        max_tokens (int, optional): Máximo de tokens a generar
+        temperature (float, optional): Temperatura de sampling
+        top_p (float, optional): Nucleus sampling
+
+    Headers:
+        Authorization: Bearer token (opcional)
+        x-api-key: API key alternativa (opcional)
+
+    Returns:
+        StreamingResponse o JSONResponse: Response en formato OpenAI Responses API
+        
+    Raises:
+        HTTPException: 400 si falta messages/input, 500 en errores internos
+        
+    Note:
+        v1.0.4: Corregido evento final de 'response.completed' a 'response.done'
+        según especificación oficial de OpenAI.
     """
     request_id = str(uuid.uuid4())[:8]
     response_id = f"msg_{request_id}"
@@ -851,7 +455,7 @@ async def responses_endpoint(request: Request):
         logger.info(f"📊 [{request_id}] Model: {body.get('model', 'N/A')} | Messages: {len(body.get('messages', []))}")
 
         # Convertir request
-        messages, kwargs = OpenAiSAIConverter.openai_to_litellm(body)
+        messages, kwargs = converter.openai_to_litellm(body)
 
         logger.info(
             f"🔄 [{request_id}] Convertido a formato LiteLLM | "
@@ -874,10 +478,10 @@ async def responses_endpoint(request: Request):
         # Decidir entre streaming y no streaming
         if stream:
             logger.info(f"🌊 [{request_id}] Modo streaming activado")
-            return await _responses_streaming(request_id, response_id, output_item_id, messages, kwargs, model)
+            return await converter._responses_streaming(request_id, response_id, output_item_id, messages, kwargs, model)
         else:
             logger.info(f"📄 [{request_id}] Modo sin streaming")
-            return await _responses_non_streaming(request_id, response_id, output_item_id, messages, kwargs, model)
+            return await converter._responses_non_streaming(request_id, response_id, output_item_id, messages, kwargs, model)
 
     except HTTPException:
         raise
@@ -885,282 +489,35 @@ async def responses_endpoint(request: Request):
         logger.error(f"❌ [{request_id}] Error en /v1/responses: {type(e).__name__}: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
-async def _responses_non_streaming(request_id: str, response_id: str, output_item_id: str,
-                                   messages: list, kwargs: dict, model: str):
-    """
-    Maneja responses sin streaming (respuesta JSON completa).
-    Compatible con OpenAI Responses API format.
-    """
-    logger.info(f"🚀 [{request_id}] Llamando a sai_llm.acompletion()...")
-    litellm_response = await sai_llm.acompletion(messages=messages, **kwargs)
-
-    # Extraer texto
-    text = ""
-    if hasattr(litellm_response, 'text') and litellm_response.text:
-        text = litellm_response.text
-    elif hasattr(litellm_response, 'choices') and litellm_response.choices:
-        choice = litellm_response.choices[0]
-        if hasattr(choice, 'message') and hasattr(choice.message, 'content'):
-            text = choice.message.content or ""
-
-    # Extraer usage
-    usage_dict = {}
-    if hasattr(litellm_response, 'usage'):
-        usage_obj = litellm_response.usage
-        if isinstance(usage_obj, dict):
-            usage_dict = usage_obj
-        else:
-            usage_dict = usage_obj.__dict__ if hasattr(usage_obj, '__dict__') else {}
-
-    # Extraer finish_reason
-    finish_reason = "end_turn"
-    if hasattr(litellm_response, 'choices') and litellm_response.choices:
-        choice = litellm_response.choices[0]
-        if hasattr(choice, 'finish_reason'):
-            litellm_finish = choice.finish_reason
-            finish_reason_map = {
-                "stop": "end_turn",
-                "length": "max_tokens",
-                "error": "error"
-            }
-            finish_reason = finish_reason_map.get(litellm_finish, "end_turn")
-
-    # Construir respuesta en formato OpenAI Responses API
-    response = {
-        "id": response_id,
-        "type": "response",
-        "model": model,
-        "created": int(time.time()),
-        "output": [
-            {
-                "id": output_item_id,
-                "type": "message",
-                "role": "assistant",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": text
-                    }
-                ],
-                "stop_reason": finish_reason
-            }
-        ],
-        "usage": {
-            "input_tokens": usage_dict.get("prompt_tokens", 0),
-            "cached_input_tokens": 0,
-            "output_tokens": usage_dict.get("completion_tokens", 0),
-            "reasoning_output_tokens": 0,
-            "total_tokens": usage_dict.get("total_tokens", 0)
-        }
-    }
-
-    logger.info(
-        f"✅ [{request_id}] Respuesta lista | "
-        f"Output tokens: {usage_dict.get('completion_tokens', 0)} | "
-        f"Stop reason: {finish_reason}"
-    )
-
-    return JSONResponse(content=response)
-
-
-async def _responses_streaming(request_id: str, response_id: str, output_item_id: str,
-                               messages: list, kwargs: dict, model: str):
-    """
-    Maneja responses con streaming SSE.
-    Compatible con OpenAI Responses API format y Codex CLI.
-    """
-    # Generar stream de eventos SSE
-    async def event_generator() -> AsyncIterator[str]:
-        try:
-            # 🔥 EVENTO CANÓNICO: response.created
-            created_event = {
-                "type": "response.created",
-                "response_id": response_id,
-                "model": model
-            }
-            yield "event: response.created\n"
-            yield f"data: {json.dumps(created_event)}\n\n"
-
-            logger.info(f"🌊 [{request_id}] Iniciando streaming SSE...")
-
-            # Variables para tracking
-            chunk_count = 0
-            total_text = ""
-            input_tokens = 0
-            output_tokens = 0
-            finish_reason = "end_turn"
-            first_chunk_received = False
-
-            # Llamar a SAI streaming
-            logger.info(f"🚀 [{request_id}] Llamando a sai_llm.astreaming()...")
-
-            output_item_added = {
-                "type": "response.output_item.added",
-                "item": {
-                    "id": output_item_id,
-                    "type": "message",
-                    "role": "assistant",
-                    "content": [
-                        {
-                            "type": "output_text",
-                            "text": ""
-                        }
-                    ]
-                }
-            }
-            yield "event: response.output_item.added\n"
-            yield f"data: {json.dumps(output_item_added)}\n\n"
-
-            try:
-                async for chunk in sai_llm.astreaming(messages=messages, **kwargs):
-                    chunk_count += 1
-
-                    if chunk_count == 1:
-                        logger.warning(f"⏱️ [{request_id}] PRIMER CHUNK recibido")
-
-                    if not first_chunk_received:
-                        logger.info(f"📦 [{request_id}] Primer chunk recibido de SAI")
-                        first_chunk_received = True
-
-                    # Extraer texto del chunk
-                    chunk_text = chunk.get('text') if isinstance(chunk, dict) else getattr(chunk, 'text', None)
-
-                    if VERBOSE_LOGGING:
-                        logger.debug(
-                            f"[{request_id}] Chunk #{chunk_count} | "
-                            f"Type: {type(chunk).__name__} | "
-                            f"Text length: {len(chunk_text) if chunk_text else 0}"
-                        )
-
-                    # Emitir delta de texto si hay contenido
-                    if chunk_text:
-                        total_text += chunk_text
-
-                        # 🔥 FORMATO CODEX CLI: OutputTextDelta
-                        text_delta_event = {
-                            "type": "response.output_text.delta",
-                            "item_id": output_item_id,
-                            "delta": chunk_text
-                        }
-                        yield f"event: response.output_text.delta\n"
-                        yield f"data: {json.dumps(text_delta_event)}\n\n"
-
-                    # Extraer usage del chunk
-                    usage = chunk.get('usage') if isinstance(chunk, dict) else getattr(chunk, 'usage', None)
-                    if usage:
-                        if isinstance(usage, dict):
-                            if usage.get("prompt_tokens", 0) > 0:
-                                input_tokens = usage.get("prompt_tokens", 0)
-                            if usage.get("completion_tokens", 0) > 0:
-                                output_tokens = usage.get("completion_tokens", 0)
-                        else:
-                            if getattr(usage, "prompt_tokens", 0) > 0:
-                                input_tokens = getattr(usage, "prompt_tokens", 0)
-                            if getattr(usage, "completion_tokens", 0) > 0:
-                                output_tokens = getattr(usage, "completion_tokens", 0)
-
-                    # Extraer finish_reason
-                    chunk_finish_reason = chunk.get('finish_reason') if isinstance(chunk, dict) else getattr(chunk, 'finish_reason', None)
-                    if chunk_finish_reason:
-                        finish_reason_map = {
-                            "stop": "end_turn",
-                            "length": "max_tokens",
-                            "error": "error"
-                        }
-                        finish_reason = finish_reason_map.get(chunk_finish_reason, "end_turn")
-
-            except Exception as stream_error:
-                logger.error(
-                    f"❌ [{request_id}] Error durante streaming: {type(stream_error).__name__}: {str(stream_error)}"
-                )
-                # Enviar evento de error
-                error_event = {
-                    "type": "error",
-                    "error": {
-                        "type": "internal_error",
-                        "message": str(stream_error)
-                    }
-                }
-                yield f"event: error\n"
-                yield f"data: {json.dumps(error_event)}\n\n"
-                return
-
-            logger.info(
-                f"📦 [{request_id}] Streaming completado | "
-                f"Chunks: {chunk_count} | "
-                f"Total chars: {len(total_text)}"
-            )
-
-            # 🔥 EVENTO: output_item.done
-            output_item_done = {
-                "type": "response.output_item.done",
-                "response_id": response_id,
-                "item_id": output_item_id
-            }
-            yield "event: response.output_item.done\n"
-            yield f"data: {json.dumps(output_item_done)}\n\n"
-
-            # 🔥 EVENTO FINAL OBLIGATORIO: response.done
-            done_event = {
-                "type": "response.done",
-                "response_id": response_id,
-                "token_usage": {
-                    "input_tokens": input_tokens,
-                    "cached_input_tokens": 0,
-                    "output_tokens": output_tokens,
-                    "reasoning_output_tokens": 0,
-                    "total_tokens": input_tokens + output_tokens
-                }
-            }
-            yield "event: response.done\n"
-            yield f"data: {json.dumps(done_event)}\n\n"
-
-            logger.info(
-                f"✅ [{request_id}] Stream finalizando | "
-                f"Input tokens: {input_tokens} | "
-                f"Output tokens: {output_tokens}"
-            )
-
-            return
-
-        except Exception as e:
-            logger.error(f"❌ [{request_id}] Error en streaming: {type(e).__name__}: {str(e)}")
-            # Enviar evento de error
-            error_event = {
-                "type": "error",
-                "error": {
-                    "type": "internal_error",
-                    "message": str(e)
-                }
-            }
-            yield f"event: error\n"
-            yield f"data: {json.dumps(error_event)}\n\n"
-
-    return StreamingResponse(
-        event_generator(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-            "Content-Type": "text/event-stream; charset=utf-8"
-        }
-    )
 
 @app.get("/v1/models")
 @app.get("/models")
 async def models_endpoint():
     """
-    Endpoint compatible con OpenAI Models API.
-    Lista los modelos disponibles en formato OpenAI.
+    Lista los modelos disponibles en formato OpenAI Models API.
+    
+    Retorna una lista de todos los modelos compatibles con SAI.
+    No requiere autenticación.
 
-    Este endpoint no requiere autenticación y retorna una lista
-    de modelos compatibles con SAI (importada desde sai_models.py).
+    Returns:
+        JSONResponse: Lista de modelos en formato OpenAI con estructura:
+            {
+                "object": "list",
+                "data": [
+                    {
+                        "id": "model-id",
+                        "object": "model",
+                        "created": timestamp,
+                        "owned_by": "organization"
+                    },
+                    ...
+                ]
+            }
     """
     logger.info("📋 GET /v1/models request recibido")
-    
+
     models_data = get_models_list()
-    
+
     logger.info(f"✅ Retornando {len(models_data['data'])} modelos disponibles")
     return JSONResponse(content=models_data)
 
@@ -1169,16 +526,24 @@ async def models_endpoint():
 @app.get("/models/{model_id}")
 async def model_detail_endpoint(model_id: str):
     """
-    Endpoint compatible con OpenAI Models API.
     Retorna detalles de un modelo específico.
+    
+    Consulta información detallada de un modelo por su ID.
+    No requiere autenticación.
 
     Args:
-        model_id: ID del modelo a consultar
+        model_id (str): ID del modelo a consultar
+        
+    Returns:
+        JSONResponse: Información del modelo en formato OpenAI
+        
+    Raises:
+        HTTPException: 404 si el modelo no existe
     """
     logger.info(f"📋 GET /v1/models/{model_id} request recibido")
-    
+
     model_info = get_model_by_id(model_id)
-    
+
     if model_info:
         logger.info(f"✅ Modelo '{model_id}' encontrado")
         return JSONResponse(content=model_info)
@@ -1199,17 +564,25 @@ async def model_detail_endpoint(model_id: str):
 
 @app.get("/")
 async def root():
-    """Documentación del gateway."""
+    """
+    Documentación y metadata del gateway.
+    
+    Retorna información sobre el servicio, versión, endpoints disponibles
+    y notas de uso.
+    
+    Returns:
+        dict: Información completa del gateway incluyendo changelog y endpoints
+    """
     return {
         "service": "OpenAI SAI Gateway",
         "version": "1.0.4",
         "description": "Gateway que expone SAI con APIs compatibles con OpenAI",
         "changelog": {
-            "1.0.4": "CORRECT FIX: Changed final event from response.completed to response.done (per OpenAI Responses API spec)",
-            "1.0.3": "Close stream immediately after completed (still wrong event name)",
-            "1.0.2": "Attempted fix with keepalives (incorrect)",
-            "1.0.1": "Attempted fix with delay (incorrect)",
-            "1.0.0": "Initial release"
+            "1.0.4": "Corregido evento final de 'response.completed' a 'response.done' según spec oficial",
+            "1.0.3": "Cierre inmediato de stream después de completed",
+            "1.0.2": "Intento de fix con keepalives",
+            "1.0.1": "Intento de fix con delay",
+            "1.0.0": "Release inicial"
         },
         "endpoints": {
             "completions": {
@@ -1217,28 +590,38 @@ async def root():
                 "method": "POST",
                 "format": "OpenAI Completions (legacy)",
                 "streaming": True,
-                "description": "Endpoint compatible con OpenAI Completions API (reutiliza sai_handler.py)"
+                "description": "Endpoint compatible con OpenAI Completions API"
             },
             "chat_completions": {
                 "paths": ["/v1/chat/completions", "/chat/completions"],
                 "method": "POST",
                 "format": "OpenAI Chat Completions",
                 "streaming": True,
-                "description": "Endpoint compatible con OpenAI SDK"
+                "description": "Endpoint compatible con OpenAI Chat Completions API"
             },
             "messages": {
                 "paths": ["/v1/messages", "/messages"],
                 "method": "POST",
                 "format": "OpenAI Messages",
                 "streaming": False,
-                "description": "Endpoint compatible con OpenAI SDK (sin streaming)"
+                "description": "Endpoint compatible con OpenAI Messages API (sin streaming)"
             },
             "responses": {
                 "paths": ["/v1/responses", "/responses"],
                 "method": "POST",
-                "format": "Codex CLI Compatible",
+                "format": "OpenAI Responses API",
                 "streaming": True,
-                "description": "Endpoint compatible con Codex CLI (emite eventos 'output_text_delta', 'output_item_done' y 'completed')"
+                "description": "Endpoint compatible con OpenAI Responses API y Codex CLI"
+            },
+            "models": {
+                "paths": ["/v1/models", "/models"],
+                "method": "GET",
+                "description": "Lista de modelos disponibles"
+            },
+            "model_detail": {
+                "paths": ["/v1/models/{model_id}", "/models/{model_id}"],
+                "method": "GET",
+                "description": "Detalles de un modelo específico"
             },
             "health": {
                 "paths": ["/health"],
@@ -1246,20 +629,31 @@ async def root():
                 "description": "Health check endpoint"
             }
         },
+        "authentication": {
+            "methods": ["Authorization header (Bearer token)", "x-api-key header"],
+            "required": False,
+            "note": "Opcional pero recomendado para uso en producción"
+        },
         "notes": [
             "Todos los endpoints funcionan con o sin el prefijo /v1",
-            "Soporta autenticación vía Authorization header o x-api-key header",
-            "El endpoint /v1/responses es el ÚNICO compatible con Codex CLI",
-            "El endpoint /v1/completions reutiliza la lógica de sai_handler.py",
-            "Codex CLI REQUIERE los eventos: output_text_delta, output_item_done, completed",
-            "v1.0.1: Fixed timing issue where stream closed before completed event was processed"
+            "El endpoint /v1/responses emite eventos SSE: response.created, response.output_text.delta, response.output_item.done, response.done",
+            "Para streaming, usar /v1/responses o /v1/chat/completions con stream=true",
+            "El endpoint /v1/messages NO soporta streaming"
         ]
     }
 
 
 @app.get("/health")
 async def health_check():
-    """Health check endpoint."""
+    """
+    Health check endpoint para monitoreo.
+    
+    Retorna el estado del servicio. Útil para load balancers y
+    sistemas de monitoreo.
+    
+    Returns:
+        dict: Estado del servicio con versión
+    """
     return {
         "status": "healthy",
         "service": "openai-sai-gateway",
@@ -1278,11 +672,13 @@ if __name__ == "__main__":
     logger.info("   - POST /v1/completions  (o /completions)")
     logger.info("           OpenAI Completions format (legacy) - streaming y no streaming")
     logger.info("   - POST /v1/chat/completions  (o /chat/completions)")
-    logger.info("           OpenAI format - streaming y no streaming")
+    logger.info("           OpenAI Chat Completions format - streaming y no streaming")
     logger.info("   - POST /v1/messages  (o /messages)")
-    logger.info("           OpenAI format - sin streaming")
+    logger.info("           OpenAI Messages format - sin streaming")
     logger.info("   - POST /v1/responses  (o /responses)")
     logger.info("           OpenAI Responses API format - con streaming SSE")
+    logger.info("   - GET /v1/models")
+    logger.info("           Lista de modelos disponibles")
     logger.info("   - GET /health")
     logger.info("")
     logger.info("💡 Todos los endpoints funcionan con o sin el prefijo /v1")
@@ -1292,7 +688,15 @@ if __name__ == "__main__":
     print("="*80 + "\n")
 
     def signal_handler(sig, frame):
-        """Manejar Ctrl+C limpiamente."""
+        """
+        Manejador de señal SIGINT (Ctrl+C).
+        
+        Permite detener el servidor limpiamente cuando se presiona Ctrl+C.
+        
+        Args:
+            sig: Señal recibida
+            frame: Frame actual de ejecución
+        """
         print("\n" + "="*80)
         logger.info("👋 Deteniendo gateway... (Ctrl+C recibido)")
         logger.info("✅ Gateway detenido exitosamente")
