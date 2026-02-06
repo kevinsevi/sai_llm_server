@@ -1,14 +1,42 @@
+"""
+sai_handler.py - Handler principal para integración con SAI (Semantic AI)
+
+Este módulo proporciona una implementación de CustomLLM de LiteLLM que actúa como
+puente entre clientes OpenAI-compatible y la API de SAI. Incluye:
+
+- Autenticación flexible (API Key o Cookie)
+- Conversión de formatos OpenAI ↔ SAI
+- Soporte para streaming y non-streaming
+- Manejo robusto de errores y reintentos
+- Logging detallado con modo verbose opcional
+- Compatibilidad con múltiples clientes (GitKraken, Codex CLI, etc.)
+
+Variables de entorno requeridas:
+    SAI_TEMPLATE_ID: ID del template de SAI a utilizar
+    SAI_URL: URL base del servidor SAI
+    SAI_KEY o SAI_COOKIE: Credenciales de autenticación (al menos una)
+
+Variables de entorno opcionales:
+    REQUEST_TIMEOUT: Timeout en segundos (default: 600)
+    MAX_RETRIES: Número máximo de reintentos (default: 3)
+    VERBOSE_LOGGING: Activar logs detallados (default: false)
+"""
+
+# sai_handler.py
+import json
 import asyncio
-from typing import AsyncIterator, Optional
+import requests
 import os
 import time
 import uuid
+import logging
+from typing import AsyncIterator, Optional
 from dotenv import load_dotenv
-import requests
 from litellm import CustomLLM, ModelResponse
 from litellm.types.utils import GenericStreamingChunk
-import logging
 from logging.handlers import RotatingFileHandler
+from fastapi.responses import StreamingResponse, JSONResponse
+
 from sai_models import is_valid_model  # Importar validación de modelos
 
 # Cargar variables de entorno
@@ -95,22 +123,954 @@ http_session.mount("http://", adapter)
 
 # ---------------- Excepciones personalizadas ----------------
 class SAIAPIError(Exception):
-    """Error base para excepciones de la API SAI"""
+    """
+    Error base para todas las excepciones relacionadas con la API de SAI.
+    
+    Utilizada como clase padre para errores específicos de SAI.
+    """
     pass
 
 
 class SAIRateLimitError(SAIAPIError):
-    """Error cuando se excede el límite de uso"""
+    """
+    Error cuando se excede el límite de uso del template o API.
+    
+    Se lanza cuando SAI retorna HTTP 429 indicando que se ha alcanzado
+    el límite de requests permitidos.
+    """
     pass
 
 
 class SAIAuthenticationError(SAIAPIError):
-    """Error de autenticación con la API"""
+    """
+    Error de autenticación con la API de SAI.
+    
+    Se lanza cuando las credenciales (API Key o Cookie) son inválidas
+    o han expirado (HTTP 401).
+    """
     pass
 
 
+# ---------------- Conversor de formatos OpenAI ----------------
+class OpenAiSAIConverter:
+    """
+    Conversor bidireccional entre formatos de API OpenAI y SAI.
+    
+    Proporciona métodos para:
+    - Convertir requests de OpenAI Messages API a formato LiteLLM
+    - Convertir responses de LiteLLM a formato OpenAI
+    - Manejar múltiples formatos de API (Completions, Chat Completions, Responses)
+    - Procesar estructuras anidadas complejas (ej: Codex CLI)
+    
+    Soporta tres tipos de endpoints:
+    1. /v1/completions - Completions API (legacy)
+    2. /v1/chat/completions - Chat Completions API
+    3. /v1/responses - Responses API (formato Codex CLI)
+    """
+
+    @staticmethod
+    def _extract_text_recursive(content) -> str:
+        """
+        Extrae texto de estructuras anidadas recursivamente.
+
+        Maneja múltiples formatos de contenido:
+        - Strings simples: "hola"
+        - Content blocks: [{"type": "text", "text": "hola"}]
+        - Estructuras anidadas: [{"type": "message", "content": [...]}]
+        - Formato Codex CLI: {"input_text": "..."}
+
+        Args:
+            content: Puede ser str, list, dict o cualquier combinación anidada
+
+        Returns:
+            str: Texto extraído y concatenado. Retorna "" si no hay texto válido.
+            
+        Examples:
+            >>> _extract_text_recursive("hola")
+            "hola"
+            >>> _extract_text_recursive([{"type": "text", "text": "hola"}])
+            "hola"
+            >>> _extract_text_recursive({"input_text": "test"})
+            "test"
+        """
+        # Caso 1: Ya es un string
+        if isinstance(content, str):
+            return content
+
+        # Caso 2: Es una lista
+        if isinstance(content, list):
+            texts = []
+            for item in content:
+                # Recursión para cada elemento de la lista
+                extracted = OpenAiSAIConverter._extract_text_recursive(item)
+                if extracted:
+                    texts.append(extracted)
+            return " ".join(texts)
+
+        # Caso 3: Es un diccionario
+        if isinstance(content, dict):
+            # Prioridad 1: Si tiene "text", usarlo directamente
+            if "text" in content:
+                return str(content["text"])
+
+            # Prioridad 2: Si tiene "content", recursión
+            if "content" in content:
+                return OpenAiSAIConverter._extract_text_recursive(content["content"])
+
+            # Prioridad 3: Si tiene "input_text" (formato Codex CLI)
+            if "input_text" in content:
+                return str(content["input_text"])
+
+            # Si no tiene ninguno de los campos esperados, retornar vacío
+            return ""
+
+        # Caso 4: Otro tipo (None, int, etc.)
+        return ""
+
+    @staticmethod
+    def openai_to_litellm(openai_request: dict) -> tuple[list, dict]:
+        """
+        Convierte request de OpenAI Messages API a formato LiteLLM.
+
+        Procesa:
+        - System prompt (si existe)
+        - Lista de mensajes con roles y contenido
+        - Parámetros de generación (temperature, max_tokens, etc.)
+        - Metadata adicional
+
+        Args:
+            openai_request: Request en formato OpenAI con estructura:
+                {
+                    "system": str (opcional),
+                    "messages": [{"role": str, "content": str/list/dict}],
+                    "model": str,
+                    "temperature": float (opcional),
+                    "max_tokens": int (opcional),
+                    ...
+                }
+
+        Returns:
+            tuple: (messages, kwargs_for_litellm)
+                - messages: Lista de mensajes procesados
+                - kwargs: Diccionario con parámetros para LiteLLM
+                
+        Example:
+            >>> messages, kwargs = openai_to_litellm({
+            ...     "messages": [{"role": "user", "content": "Hello"}],
+            ...     "model": "claude-sonnet-4-5-20250929"
+            ... })
+        """
+        messages = []
+
+        # Extraer system prompt si existe
+        system_prompt = openai_request.get("system", "")
+        if system_prompt:
+            system_text = OpenAiSAIConverter._extract_text_recursive(system_prompt)
+            if system_text:
+                messages.append({
+                    "role": "system",
+                    "content": system_text
+                })
+
+        # Convertir mensajes
+        for msg in openai_request.get("messages", []):
+            role = msg.get("role")
+            content = msg.get("content")
+
+            # Usar extracción recursiva para manejar cualquier nivel de anidación
+            text_content = OpenAiSAIConverter._extract_text_recursive(content)
+
+            # Solo agregar si hay contenido real
+            if text_content:
+                messages.append({
+                    "role": role,
+                    "content": text_content
+                })
+
+        # Preparar kwargs para LiteLLM
+        kwargs = {
+            "model": openai_request.get("model", "claude-sonnet-4-5-20250929"),
+            "temperature": openai_request.get("temperature"),
+            "max_tokens": openai_request.get("max_tokens", 4096),
+            "top_p": openai_request.get("top_p"),
+            "top_k": openai_request.get("top_k"),
+            "stop_sequences": openai_request.get("stop_sequences"),
+        }
+
+        # Filtrar None values
+        kwargs = {k: v for k, v in kwargs.items() if v is not None}
+
+        # Extraer metadata adicional si existe
+        metadata = openai_request.get("metadata", {})
+        if metadata:
+            kwargs["litellm_params"] = {
+                "metadata": metadata
+            }
+
+        return messages, kwargs
+
+    @staticmethod
+    def litellm_to_openai_response(litellm_response, model: str, request_id: str) -> dict:
+        """
+        Convierte respuesta de LiteLLM a formato OpenAI Messages API.
+
+        Extrae:
+        - Texto de la respuesta
+        - Información de uso (tokens)
+        - Razón de finalización (finish_reason)
+
+        Args:
+            litellm_response: Respuesta de sai_llm.acompletion()
+            model: Nombre del modelo utilizado
+            request_id: ID único de la solicitud para tracking
+
+        Returns:
+            dict: Respuesta en formato OpenAI Messages API:
+                {
+                    "id": "msg_...",
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "..."}],
+                    "model": str,
+                    "stop_reason": str,
+                    "usage": {"input_tokens": int, "output_tokens": int}
+                }
+        """
+        # Extraer texto de la respuesta
+        text = ""
+        if hasattr(litellm_response, 'text') and litellm_response.text:
+            text = litellm_response.text
+        elif hasattr(litellm_response, 'choices') and litellm_response.choices:
+            choice = litellm_response.choices[0]
+            if hasattr(choice, 'message') and hasattr(choice.message, 'content'):
+                text = choice.message.content or ""
+
+        # Extraer usage
+        usage_dict = {}
+        if hasattr(litellm_response, 'usage'):
+            usage_obj = litellm_response.usage
+            if isinstance(usage_obj, dict):
+                usage_dict = usage_obj
+            else:
+                usage_dict = usage_obj.__dict__ if hasattr(usage_obj, '__dict__') else {}
+
+        # Extraer finish_reason
+        finish_reason = "end_turn"
+        if hasattr(litellm_response, 'choices') and litellm_response.choices:
+            choice = litellm_response.choices[0]
+            if hasattr(choice, 'finish_reason'):
+                litellm_finish = choice.finish_reason
+                # Mapear finish_reason de LiteLLM a OpenAI
+                finish_reason_map = {
+                    "stop": "end_turn",
+                    "length": "max_tokens",
+                    "error": "error"
+                }
+                finish_reason = finish_reason_map.get(litellm_finish, "end_turn")
+
+        return {
+            "id": f"msg_{request_id}",
+            "type": "message",
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "text",
+                    "text": text
+                }
+            ],
+            "model": model,
+            "stop_reason": finish_reason,
+            "stop_sequence": None,
+            "usage": {
+                "input_tokens": usage_dict.get("prompt_tokens", 0),
+                "output_tokens": usage_dict.get("completion_tokens", 0)
+            }
+        }
+
+    async def _completions_non_streaming(self, request_id: str, messages: list, kwargs: dict, model: str):
+        """
+        Maneja requests a /v1/completions sin streaming.
+        
+        Formato de respuesta compatible con OpenAI Completions API (legacy).
+
+        Args:
+            request_id: ID único de la solicitud
+            messages: Lista de mensajes procesados
+            kwargs: Parámetros adicionales para LiteLLM
+            model: Nombre del modelo
+
+        Returns:
+            JSONResponse: Respuesta en formato OpenAI Completions
+        """
+        logger.info(f"🚀 [{request_id}] Llamando a sai_llm.acompletion()...")
+        litellm_response = await sai_llm.acompletion(messages=messages, **kwargs)
+
+        # Extraer texto
+        text = ""
+        if hasattr(litellm_response, 'text') and litellm_response.text:
+            text = litellm_response.text
+        elif hasattr(litellm_response, 'choices') and litellm_response.choices:
+            choice = litellm_response.choices[0]
+            if hasattr(choice, 'message') and hasattr(choice.message, 'content'):
+                text = choice.message.content or ""
+
+        # Extraer usage
+        usage_dict = {}
+        if hasattr(litellm_response, 'usage'):
+            usage_obj = litellm_response.usage
+            if isinstance(usage_obj, dict):
+                usage_dict = usage_obj
+            else:
+                usage_dict = usage_obj.__dict__ if hasattr(usage_obj, '__dict__') else {}
+
+        # Extraer finish_reason
+        finish_reason = "stop"
+        if hasattr(litellm_response, 'choices') and litellm_response.choices:
+            choice = litellm_response.choices[0]
+            if hasattr(choice, 'finish_reason'):
+                finish_reason = choice.finish_reason or "stop"
+
+        # Construir respuesta en formato OpenAI Completions
+        openai_response = {
+            "id": f"cmpl-{request_id}",
+            "object": "text_completion",
+            "created": int(time.time()),
+            "model": model,
+            "choices": [
+                {
+                    "text": text,
+                    "index": 0,
+                    "logprobs": None,
+                    "finish_reason": finish_reason
+                }
+            ],
+            "usage": {
+                "prompt_tokens": usage_dict.get("prompt_tokens", 0),
+                "completion_tokens": usage_dict.get("completion_tokens", 0),
+                "total_tokens": usage_dict.get("total_tokens", 0)
+            }
+        }
+
+        logger.info(
+            f"✅ [{request_id}] Respuesta lista | "
+            f"Output tokens: {usage_dict.get('completion_tokens', 0)}"
+        )
+
+        return JSONResponse(content=openai_response)
+
+    async def _completions_streaming(self, request_id: str, messages: list, kwargs: dict, model: str):
+        """
+        Maneja requests a /v1/completions con streaming SSE.
+        
+        Emite eventos Server-Sent Events con chunks de texto.
+
+        Args:
+            request_id: ID único de la solicitud
+            messages: Lista de mensajes procesados
+            kwargs: Parámetros adicionales para LiteLLM
+            model: Nombre del modelo
+
+        Returns:
+            StreamingResponse: Stream de eventos SSE con formato:
+                data: {"id": "cmpl-...", "choices": [{"text": "...", ...}]}
+                data: [DONE]
+        """
+        async def event_generator():
+            try:
+                logger.info(f"🌊 [{request_id}] Iniciando streaming...")
+
+                # Llamar a SAI streaming (reutiliza sai_handler.py)
+                logger.info(f"🚀 [{request_id}] Llamando a sai_llm.astreaming()...")
+
+                chunk_count = 0
+
+                async for chunk in sai_llm.astreaming(messages=messages, **kwargs):
+                    chunk_count += 1
+
+                    if chunk_count == 1:
+                        logger.warning(f"⏱️ [{request_id}] PRIMER CHUNK recibido")
+
+                    # Extraer texto del chunk
+                    chunk_text = chunk.get('text') if isinstance(chunk, dict) else getattr(chunk, 'text', None)
+
+                    if chunk_text:
+                        # Chunk de contenido en formato Completions
+                        content_chunk = {
+                            "id": f"cmpl-{request_id}",
+                            "object": "text_completion",
+                            "created": int(time.time()),
+                            "model": model,
+                            "choices": [
+                                {
+                                    "text": chunk_text,
+                                    "index": 0,
+                                    "logprobs": None,
+                                    "finish_reason": None
+                                }
+                            ]
+                        }
+                        yield f"data: {json.dumps(content_chunk)}\n\n"
+
+                    # Verificar si es el último chunk
+                    is_finished = chunk.get('is_finished') if isinstance(chunk, dict) else getattr(chunk, 'is_finished', False)
+                    if is_finished:
+                        finish_reason = chunk.get('finish_reason') if isinstance(chunk, dict) else getattr(chunk, 'finish_reason', 'stop')
+
+                        # Chunk final
+                        final_chunk = {
+                            "id": f"cmpl-{request_id}",
+                            "object": "text_completion",
+                            "created": int(time.time()),
+                            "model": model,
+                            "choices": [
+                                {
+                                    "text": "",
+                                    "index": 0,
+                                    "logprobs": None,
+                                    "finish_reason": finish_reason or "stop"
+                                }
+                            ]
+                        }
+                        yield f"data: {json.dumps(final_chunk)}\n\n"
+
+                # Enviar [DONE]
+                yield "data: [DONE]\n\n"
+
+                logger.info(f"✅ [{request_id}] Streaming completado | Chunks: {chunk_count}")
+
+            except Exception as e:
+                logger.error(f"❌ [{request_id}] Error en streaming: {type(e).__name__}: {str(e)}")
+                error_chunk = {
+                    "error": {
+                        "message": str(e),
+                        "type": "internal_error"
+                    }
+                }
+                yield f"data: {json.dumps(error_chunk)}\n\n"
+
+        return StreamingResponse(
+            event_generator(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+                "Transfer-Encoding": "chunked"
+            }
+        )
+
+    async def _chat_completions_non_streaming(self, request_id: str, messages: list, kwargs: dict, model: str):
+        """
+        Maneja requests a /v1/chat/completions sin streaming.
+        
+        Formato de respuesta compatible con OpenAI Chat Completions API.
+
+        Args:
+            request_id: ID único de la solicitud
+            messages: Lista de mensajes procesados
+            kwargs: Parámetros adicionales para LiteLLM
+            model: Nombre del modelo
+
+        Returns:
+            JSONResponse: Respuesta en formato OpenAI Chat Completions
+        """
+        logger.info(f"🚀 [{request_id}] Llamando a sai_llm.acompletion()...")
+        litellm_response = await sai_llm.acompletion(messages=messages, **kwargs)
+
+        # Extraer texto
+        text = ""
+        if hasattr(litellm_response, 'text') and litellm_response.text:
+            text = litellm_response.text
+        elif hasattr(litellm_response, 'choices') and litellm_response.choices:
+            choice = litellm_response.choices[0]
+            if hasattr(choice, 'message') and hasattr(choice.message, 'content'):
+                text = choice.message.content or ""
+
+        # Extraer usage
+        usage_dict = {}
+        if hasattr(litellm_response, 'usage'):
+            usage_obj = litellm_response.usage
+            if isinstance(usage_obj, dict):
+                usage_dict = usage_obj
+            else:
+                usage_dict = usage_obj.__dict__ if hasattr(usage_obj, '__dict__') else {}
+
+        # Extraer finish_reason
+        finish_reason = "stop"
+        if hasattr(litellm_response, 'choices') and litellm_response.choices:
+            choice = litellm_response.choices[0]
+            if hasattr(choice, 'finish_reason'):
+                finish_reason = choice.finish_reason or "stop"
+
+        # Construir respuesta en formato OpenAI
+        openai_response = {
+            "id": f"chatcmpl-{request_id}",
+            "object": "chat.completion",
+            "created": int(time.time()),
+            "model": model,
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": text
+                    },
+                    "finish_reason": finish_reason
+                }
+            ],
+            "usage": {
+                "prompt_tokens": usage_dict.get("prompt_tokens", 0),
+                "completion_tokens": usage_dict.get("completion_tokens", 0),
+                "total_tokens": usage_dict.get("total_tokens", 0)
+            }
+        }
+
+        logger.info(
+            f"✅ [{request_id}] Respuesta lista | "
+            f"Output tokens: {usage_dict.get('completion_tokens', 0)}"
+        )
+
+        return JSONResponse(content=openai_response)
+
+    async def _chat_completions_streaming(self, request_id: str, messages: list, kwargs: dict, model: str):
+        """
+        Maneja requests a /v1/chat/completions con streaming SSE.
+        
+        Emite eventos Server-Sent Events con deltas de contenido.
+
+        Args:
+            request_id: ID único de la solicitud
+            messages: Lista de mensajes procesados
+            kwargs: Parámetros adicionales para LiteLLM
+            model: Nombre del modelo
+
+        Returns:
+            StreamingResponse: Stream de eventos SSE con formato:
+                data: {"id": "chatcmpl-...", "choices": [{"delta": {"content": "..."}, ...}]}
+                data: [DONE]
+        """
+        async def event_generator():
+            try:
+                logger.info(f"🌊 [{request_id}] Iniciando streaming...")
+
+                # Chunk inicial
+                initial_chunk = {
+                    "id": f"chatcmpl-{request_id}",
+                    "object": "chat.completion.chunk",
+                    "created": int(time.time()),
+                    "model": model,
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {"role": "assistant"},
+                            "finish_reason": None
+                        }
+                    ]
+                }
+                yield f"data: {json.dumps(initial_chunk)}\n\n"
+
+                # Llamar a SAI streaming
+                logger.info(f"🚀 [{request_id}] Llamando a sai_llm.astreaming()...")
+
+                chunk_count = 0
+                total_tokens = 0
+                input_tokens = 0
+                output_tokens = 0
+
+                async for chunk in sai_llm.astreaming(messages=messages, **kwargs):
+                    chunk_count += 1
+
+                    if chunk_count == 1:
+                        logger.warning(f"⏱️ [{request_id}] PRIMER CHUNK recibido")
+
+                    # Extraer texto del chunk
+                    chunk_text = chunk.get('text') if isinstance(chunk, dict) else getattr(chunk, 'text', None)
+
+                    if chunk_text:
+                        # Chunk de contenido
+                        content_chunk = {
+                            "id": f"chatcmpl-{request_id}",
+                            "object": "chat.completion.chunk",
+                            "created": int(time.time()),
+                            "model": model,
+                            "choices": [
+                                {
+                                    "index": 0,
+                                    "delta": {"content": chunk_text},
+                                    "finish_reason": None
+                                }
+                            ]
+                        }
+                        yield f"data: {json.dumps(content_chunk)}\n\n"
+
+                    # Extraer usage
+                    usage = chunk.get('usage') if isinstance(chunk, dict) else getattr(chunk, 'usage', None)
+                    if usage:
+                        if isinstance(usage, dict):
+                            input_tokens = usage.get("prompt_tokens", 0) or input_tokens
+                            output_tokens = usage.get("completion_tokens", 0) or output_tokens
+                            total_tokens = usage.get("total_tokens", 0) or total_tokens
+
+                    # Verificar si es el último chunk
+                    is_finished = chunk.get('is_finished') if isinstance(chunk, dict) else getattr(chunk, 'is_finished', False)
+                    if is_finished:
+                        finish_reason = chunk.get('finish_reason') if isinstance(chunk, dict) else getattr(chunk, 'finish_reason', 'stop')
+
+                        # Chunk final
+                        final_chunk = {
+                            "id": f"chatcmpl-{request_id}",
+                            "object": "chat.completion.chunk",
+                            "created": int(time.time()),
+                            "model": model,
+                            "choices": [
+                                {
+                                    "index": 0,
+                                    "delta": {},
+                                    "finish_reason": finish_reason or "stop"
+                                }
+                            ]
+                        }
+                        yield f"data: {json.dumps(final_chunk)}\n\n"
+
+                # Enviar [DONE]
+                yield "data: [DONE]\n\n"
+
+                logger.info(f"✅ [{request_id}] Streaming completado | Chunks: {chunk_count}")
+
+            except Exception as e:
+                logger.error(f"❌ [{request_id}] Error en streaming: {type(e).__name__}: {str(e)}")
+                error_chunk = {
+                    "error": {
+                        "message": str(e),
+                        "type": "internal_error"
+                    }
+                }
+                yield f"data: {json.dumps(error_chunk)}\n\n"
+
+        return StreamingResponse(
+            event_generator(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+                "Transfer-Encoding": "chunked"
+            }
+        )
+
+    async def _responses_non_streaming(self, request_id: str, response_id: str, output_item_id: str,
+                                       messages: list, kwargs: dict, model: str):
+        """
+        Maneja requests a /v1/responses sin streaming.
+        
+        Compatible con OpenAI Responses API y Codex CLI.
+
+        Args:
+            request_id: ID único de la solicitud
+            response_id: ID de la respuesta
+            output_item_id: ID del item de salida
+            messages: Lista de mensajes procesados
+            kwargs: Parámetros adicionales para LiteLLM
+            model: Nombre del modelo
+
+        Returns:
+            JSONResponse: Respuesta en formato OpenAI Responses API
+        """
+        logger.info(f"🚀 [{request_id}] Llamando a sai_llm.acompletion()...")
+        litellm_response = await sai_llm.acompletion(messages=messages, **kwargs)
+
+        # Extraer texto
+        text = ""
+        if hasattr(litellm_response, 'text') and litellm_response.text:
+            text = litellm_response.text
+        elif hasattr(litellm_response, 'choices') and litellm_response.choices:
+            choice = litellm_response.choices[0]
+            if hasattr(choice, 'message') and hasattr(choice.message, 'content'):
+                text = choice.message.content or ""
+
+        # Extraer usage
+        usage_dict = {}
+        if hasattr(litellm_response, 'usage'):
+            usage_obj = litellm_response.usage
+            if isinstance(usage_obj, dict):
+                usage_dict = usage_obj
+            else:
+                usage_dict = usage_obj.__dict__ if hasattr(usage_obj, '__dict__') else {}
+
+        # Extraer finish_reason
+        finish_reason = "end_turn"
+        if hasattr(litellm_response, 'choices') and litellm_response.choices:
+            choice = litellm_response.choices[0]
+            if hasattr(choice, 'finish_reason'):
+                litellm_finish = choice.finish_reason
+                finish_reason_map = {
+                    "stop": "end_turn",
+                    "length": "max_tokens",
+                    "error": "error"
+                }
+                finish_reason = finish_reason_map.get(litellm_finish, "end_turn")
+
+        # Construir respuesta en formato OpenAI Responses API
+        response = {
+            "id": response_id,
+            "type": "response",
+            "model": model,
+            "created": int(time.time()),
+            "output": [
+                {
+                    "id": output_item_id,
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": text
+                        }
+                    ],
+                    "stop_reason": finish_reason
+                }
+            ],
+            "usage": {
+                "input_tokens": usage_dict.get("prompt_tokens", 0),
+                "cached_input_tokens": 0,
+                "output_tokens": usage_dict.get("completion_tokens", 0),
+                "reasoning_output_tokens": 0,
+                "total_tokens": usage_dict.get("total_tokens", 0)
+            }
+        }
+
+        logger.info(
+            f"✅ [{request_id}] Respuesta lista | "
+            f"Output tokens: {usage_dict.get('completion_tokens', 0)} | "
+            f"Stop reason: {finish_reason}"
+        )
+
+        return JSONResponse(content=response)
+
+    async def _responses_streaming(self, request_id: str, response_id: str, output_item_id: str,
+                                   messages: list, kwargs: dict, model: str):
+        """
+        Maneja requests a /v1/responses con streaming SSE.
+        
+        Compatible con OpenAI Responses API y Codex CLI.
+        Emite eventos canónicos:
+        - response.created
+        - response.output_item.added
+        - response.output_text.delta
+        - response.output_item.done
+        - response.done
+
+        Args:
+            request_id: ID único de la solicitud
+            response_id: ID de la respuesta
+            output_item_id: ID del item de salida
+            messages: Lista de mensajes procesados
+            kwargs: Parámetros adicionales para LiteLLM
+            model: Nombre del modelo
+
+        Returns:
+            StreamingResponse: Stream de eventos SSE con formato Codex CLI
+        """
+        # Generar stream de eventos SSE
+        async def event_generator() -> AsyncIterator[str]:
+            try:
+                # 🔥 EVENTO CANÓNICO: response.created
+                created_event = {
+                    "type": "response.created",
+                    "response_id": response_id,
+                    "model": model
+                }
+                yield "event: response.created\n"
+                yield f"data: {json.dumps(created_event)}\n\n"
+
+                logger.info(f"🌊 [{request_id}] Iniciando streaming SSE...")
+
+                # Variables para tracking
+                chunk_count = 0
+                total_text = ""
+                input_tokens = 0
+                output_tokens = 0
+                finish_reason = "end_turn"
+                first_chunk_received = False
+
+                # Llamar a SAI streaming
+                logger.info(f"🚀 [{request_id}] Llamando a sai_llm.astreaming()...")
+
+                output_item_added = {
+                    "type": "response.output_item.added",
+                    "item": {
+                        "id": output_item_id,
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": ""
+                            }
+                        ]
+                    }
+                }
+                yield "event: response.output_item.added\n"
+                yield f"data: {json.dumps(output_item_added)}\n\n"
+
+                try:
+                    async for chunk in sai_llm.astreaming(messages=messages, **kwargs):
+                        chunk_count += 1
+
+                        if chunk_count == 1:
+                            logger.warning(f"⏱️ [{request_id}] PRIMER CHUNK recibido")
+
+                        if not first_chunk_received:
+                            logger.info(f"📦 [{request_id}] Primer chunk recibido de SAI")
+                            first_chunk_received = True
+
+                        # Extraer texto del chunk
+                        chunk_text = chunk.get('text') if isinstance(chunk, dict) else getattr(chunk, 'text', None)
+
+                        if VERBOSE_LOGGING:
+                            logger.debug(
+                                f"[{request_id}] Chunk #{chunk_count} | "
+                                f"Type: {type(chunk).__name__} | "
+                                f"Text length: {len(chunk_text) if chunk_text else 0}"
+                            )
+
+                        # Emitir delta de texto si hay contenido
+                        if chunk_text:
+                            total_text += chunk_text
+
+                            # 🔥 FORMATO CODEX CLI: OutputTextDelta
+                            text_delta_event = {
+                                "type": "response.output_text.delta",
+                                "item_id": output_item_id,
+                                "delta": chunk_text
+                            }
+                            yield f"event: response.output_text.delta\n"
+                            yield f"data: {json.dumps(text_delta_event)}\n\n"
+
+                        # Extraer usage del chunk
+                        usage = chunk.get('usage') if isinstance(chunk, dict) else getattr(chunk, 'usage', None)
+                        if usage:
+                            if isinstance(usage, dict):
+                                if usage.get("prompt_tokens", 0) > 0:
+                                    input_tokens = usage.get("prompt_tokens", 0)
+                                if usage.get("completion_tokens", 0) > 0:
+                                    output_tokens = usage.get("completion_tokens", 0)
+                            else:
+                                if getattr(usage, "prompt_tokens", 0) > 0:
+                                    input_tokens = getattr(usage, "prompt_tokens", 0)
+                                if getattr(usage, "completion_tokens", 0) > 0:
+                                    output_tokens = getattr(usage, "completion_tokens", 0)
+
+                        # Extraer finish_reason
+                        chunk_finish_reason = chunk.get('finish_reason') if isinstance(chunk, dict) else getattr(chunk, 'finish_reason', None)
+                        if chunk_finish_reason:
+                            finish_reason_map = {
+                                "stop": "end_turn",
+                                "length": "max_tokens",
+                                "error": "error"
+                            }
+                            finish_reason = finish_reason_map.get(chunk_finish_reason, "end_turn")
+
+                except Exception as stream_error:
+                    logger.error(
+                        f"❌ [{request_id}] Error durante streaming: {type(stream_error).__name__}: {str(stream_error)}"
+                    )
+                    # Enviar evento de error
+                    error_event = {
+                        "type": "error",
+                        "error": {
+                            "type": "internal_error",
+                            "message": str(stream_error)
+                        }
+                    }
+                    yield f"event: error\n"
+                    yield f"data: {json.dumps(error_event)}\n\n"
+                    return
+
+                logger.info(
+                    f"📦 [{request_id}] Streaming completado | "
+                    f"Chunks: {chunk_count} | "
+                    f"Total chars: {len(total_text)}"
+                )
+
+                # 🔥 EVENTO: output_item.done
+                output_item_done = {
+                    "type": "response.output_item.done",
+                    "response_id": response_id,
+                    "item_id": output_item_id
+                }
+                yield "event: response.output_item.done\n"
+                yield f"data: {json.dumps(output_item_done)}\n\n"
+
+                # 🔥 EVENTO FINAL OBLIGATORIO: response.done
+                done_event = {
+                    "type": "response.done",
+                    "response_id": response_id,
+                    "token_usage": {
+                        "input_tokens": input_tokens,
+                        "cached_input_tokens": 0,
+                        "output_tokens": output_tokens,
+                        "reasoning_output_tokens": 0,
+                        "total_tokens": input_tokens + output_tokens
+                    }
+                }
+                yield "event: response.done\n"
+                yield f"data: {json.dumps(done_event)}\n\n"
+
+                logger.info(
+                    f"✅ [{request_id}] Stream finalizando | "
+                    f"Input tokens: {input_tokens} | "
+                    f"Output tokens: {output_tokens}"
+                )
+
+                return
+
+            except Exception as e:
+                logger.error(f"❌ [{request_id}] Error en streaming: {type(e).__name__}: {str(e)}")
+                # Enviar evento de error
+                error_event = {
+                    "type": "error",
+                    "error": {
+                        "type": "internal_error",
+                        "message": str(e)
+                    }
+                }
+                yield f"event: error\n"
+                yield f"data: {json.dumps(error_event)}\n\n"
+
+        return StreamingResponse(
+            event_generator(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+                "Content-Type": "text/event-stream; charset=utf-8"
+            }
+        )
+
 class SAILLM(CustomLLM):
+    """
+    Implementación de CustomLLM para integración con SAI.
+    
+    Proporciona métodos síncronos y asíncronos para:
+    - Completions (completion, acompletion)
+    - Streaming (astreaming)
+    
+    Características:
+    - Autenticación flexible (API Key o Cookie)
+    - Extracción de credenciales desde múltiples fuentes
+    - Detección de user-agent para compatibilidad con clientes específicos
+    - Procesamiento de mensajes envueltos por plugins de IDE
+    - Manejo robusto de errores con reintentos automáticos
+    - Logging detallado con modo verbose
+    
+    Attributes:
+        Hereda de CustomLLM de LiteLLM
+    """
+
     def __init__(self):
+        """Inicializa la instancia de SAILLM."""
         super().__init__()
 
     def _extract_from_litellm_params(self, kwargs: dict) -> tuple[Optional[str], Optional[str]]:
@@ -1144,8 +2104,13 @@ class SAILLM(CustomLLM):
             return self._handle_request_exceptions(e, resp, auth_method, url, request_timeout, request_id)
 
 
-# ---------------- Instancia ----------------
+# ---------------- Instancia global ----------------
 sai_llm = SAILLM()
+"""Instancia global de SAILLM lista para usar."""
+
+converter = OpenAiSAIConverter()
+"""Instancia global del conversor de formatos OpenAI ↔ SAI."""
+
 logger.info(
     f"✅ SAILLM inicializado correctamente | "
     f"Clase: {sai_llm.__class__.__name__} | "
