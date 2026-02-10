@@ -35,7 +35,7 @@ from dotenv import load_dotenv
 from litellm import CustomLLM, ModelResponse
 from litellm.types.utils import GenericStreamingChunk
 from logging.handlers import RotatingFileHandler
-from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.responses import StreamingResponse, JSONResponse, Response
 
 from sai_models import is_valid_model  # Importar validación de modelos
 
@@ -236,6 +236,7 @@ class OpenAiSAIConverter:
         - System prompt (si existe)
         - Lista de mensajes con roles y contenido
         - Parámetros de generación (temperature, max_tokens, etc.)
+        - Tools/funciones disponibles
         - Metadata adicional
 
         Args:
@@ -246,6 +247,7 @@ class OpenAiSAIConverter:
                     "model": str,
                     "temperature": float (opcional),
                     "max_tokens": int (opcional),
+                    "tools": list (opcional),
                     ...
                 }
 
@@ -296,6 +298,16 @@ class OpenAiSAIConverter:
             "top_k": openai_request.get("top_k"),
             "stop_sequences": openai_request.get("stop_sequences"),
         }
+        
+        # Agregar tools si existen y no es lista vacía
+        tools = openai_request.get("tools")
+        if tools is not None:
+            # Omitir si es lista vacía
+            if isinstance(tools, list) and len(tools) == 0:
+                logger.info("[TOOLS] openai_to_litellm(): tools es lista vacía [] - omitiendo")
+            else:
+                kwargs["tools"] = tools
+                kwargs["tool_choice"] = openai_request.get("tool_choice", "auto")
 
         # Filtrar None values
         kwargs = {k: v for k, v in kwargs.items() if v is not None}
@@ -456,7 +468,12 @@ class OpenAiSAIConverter:
             f"Output tokens: {usage_dict.get('completion_tokens', 0)}"
         )
 
-        return JSONResponse(content=openai_response)
+        # Retornar JSON formateado con indentación
+        return Response(
+            content=json.dumps(openai_response, indent=4, ensure_ascii=False) + "\n",
+            media_type="application/json",
+            headers={"Content-Type": "application/json; charset=utf-8"}
+        )
 
     async def _completions_streaming(self, request_id: str, messages: list, kwargs: dict, model: str):
         """
@@ -562,7 +579,7 @@ class OpenAiSAIConverter:
     async def _chat_completions_non_streaming(self, request_id: str, messages: list, kwargs: dict, model: str):
         """
         Maneja requests a /v1/chat/completions sin streaming.
-        
+
         Formato de respuesta compatible con OpenAI Chat Completions API.
 
         Args:
@@ -577,14 +594,22 @@ class OpenAiSAIConverter:
         logger.info(f"🚀 [{request_id}] Llamando a sai_llm.acompletion()...")
         litellm_response = await sai_llm.acompletion(messages=messages, **kwargs)
 
-        # Extraer texto
+        # Extraer texto y tool_calls
         text = ""
-        if hasattr(litellm_response, 'text') and litellm_response.text:
-            text = litellm_response.text
-        elif hasattr(litellm_response, 'choices') and litellm_response.choices:
+        tool_calls = None
+
+        if hasattr(litellm_response, 'choices') and litellm_response.choices:
             choice = litellm_response.choices[0]
-            if hasattr(choice, 'message') and hasattr(choice.message, 'content'):
-                text = choice.message.content or ""
+
+            # Extraer tool_calls si existen
+            if hasattr(choice, 'message'):
+                if hasattr(choice.message, 'tool_calls') and choice.message.tool_calls:
+                    tool_calls = choice.message.tool_calls
+                # Siempre extraer content (puede coexistir con tool_calls)
+                if hasattr(choice.message, 'content'):
+                    text = choice.message.content or ""
+        elif hasattr(litellm_response, 'text') and litellm_response.text:
+            text = litellm_response.text
 
         # Extraer usage
         usage_dict = {}
@@ -596,11 +621,42 @@ class OpenAiSAIConverter:
                 usage_dict = usage_obj.__dict__ if hasattr(usage_obj, '__dict__') else {}
 
         # Extraer finish_reason
-        finish_reason = "stop"
+        finish_reason = "tool_calls" if tool_calls else "stop"
         if hasattr(litellm_response, 'choices') and litellm_response.choices:
             choice = litellm_response.choices[0]
-            if hasattr(choice, 'finish_reason'):
-                finish_reason = choice.finish_reason or "stop"
+            if hasattr(choice, 'finish_reason') and choice.finish_reason:
+                finish_reason = choice.finish_reason
+
+        # Construir mensaje de respuesta
+        response_message = {
+            "role": "assistant",
+            "content": text if text else None  # Incluir texto si existe, null si está vacío
+        }
+
+        # Agregar tool_calls si existen
+        if tool_calls:
+            # Convertir tool_calls a formato dict si es necesario
+            if not isinstance(tool_calls, list):
+                tool_calls = [tool_calls]
+
+            response_message["tool_calls"] = []
+            for tc in tool_calls:
+                if hasattr(tc, '__dict__'):
+                    tc_dict = {
+                        "id": getattr(tc, 'id', f"call_{request_id}"),
+                        "type": getattr(tc, 'type', 'function'),
+                        "function": {
+                            "name": getattr(tc.function, 'name', '') if hasattr(tc, 'function') else '',
+                            "arguments": getattr(tc.function, 'arguments', '{}') if hasattr(tc, 'function') else '{}'
+                        }
+                    }
+                else:
+                    tc_dict = tc
+                response_message["tool_calls"].append(tc_dict)
+
+            # Agregar campos adicionales requeridos por OpenAI
+            response_message["refusal"] = None
+            response_message["annotations"] = []
 
         # Construir respuesta en formato OpenAI
         openai_response = {
@@ -611,26 +667,42 @@ class OpenAiSAIConverter:
             "choices": [
                 {
                     "index": 0,
-                    "message": {
-                        "role": "assistant",
-                        "content": text
-                    },
+                    "message": response_message,
                     "finish_reason": finish_reason
                 }
             ],
             "usage": {
                 "prompt_tokens": usage_dict.get("prompt_tokens", 0),
                 "completion_tokens": usage_dict.get("completion_tokens", 0),
-                "total_tokens": usage_dict.get("total_tokens", 0)
-            }
+                "total_tokens": usage_dict.get("total_tokens", 0),
+                "prompt_tokens_details": {
+                    "cached_tokens": 0,
+                    "audio_tokens": 0
+                },
+                "completion_tokens_details": {
+                    "reasoning_tokens": 0,
+                    "audio_tokens": 0,
+                    "accepted_prediction_tokens": 0,
+                    "rejected_prediction_tokens": 0
+                }
+            },
+            "service_tier": "default",
+            "system_fingerprint": None
         }
 
         logger.info(
             f"✅ [{request_id}] Respuesta lista | "
-            f"Output tokens: {usage_dict.get('completion_tokens', 0)}"
+            f"Output tokens: {usage_dict.get('completion_tokens', 0)} | "
+            f"Tool calls: {len(tool_calls) if tool_calls else 0} | "
+            f"Content length: {len(text) if text else 0}"
         )
 
-        return JSONResponse(content=openai_response)
+        # Retornar JSON formateado con indentación
+        return Response(
+            content=json.dumps(openai_response, indent=4, ensure_ascii=False) + "\n",
+            media_type="application/json",
+            headers={"Content-Type": "application/json; charset=utf-8"}
+        )
 
     async def _chat_completions_streaming(self, request_id: str, messages: list, kwargs: dict, model: str):
         """
@@ -653,29 +725,13 @@ class OpenAiSAIConverter:
             try:
                 logger.info(f"🌊 [{request_id}] Iniciando streaming...")
 
-                # Chunk inicial
-                initial_chunk = {
-                    "id": f"chatcmpl-{request_id}",
-                    "object": "chat.completion.chunk",
-                    "created": int(time.time()),
-                    "model": model,
-                    "choices": [
-                        {
-                            "index": 0,
-                            "delta": {"role": "assistant"},
-                            "finish_reason": None
-                        }
-                    ]
-                }
-                yield f"data: {json.dumps(initial_chunk)}\n\n"
-
                 # Llamar a SAI streaming
                 logger.info(f"🚀 [{request_id}] Llamando a sai_llm.astreaming()...")
 
                 chunk_count = 0
-                total_tokens = 0
-                input_tokens = 0
-                output_tokens = 0
+                tool_calls_emitted = False
+                first_content_chunk = True
+                created_timestamp = int(time.time())
 
                 async for chunk in sai_llm.astreaming(messages=messages, **kwargs):
                     chunk_count += 1
@@ -683,16 +739,122 @@ class OpenAiSAIConverter:
                     if chunk_count == 1:
                         logger.warning(f"⏱️ [{request_id}] PRIMER CHUNK recibido")
 
-                    # Extraer texto del chunk
+                    # Extraer tool_use del chunk
+                    tool_use = chunk.get('tool_use') if isinstance(chunk, dict) else getattr(chunk, 'tool_use', None)
+
+                    # Si hay tool_calls, emitirlos en formato streaming
+                    if tool_use and not tool_calls_emitted:
+                        # Chunk inicial con role
+                        initial_chunk = {
+                            "id": f"chatcmpl-{request_id}",
+                            "object": "chat.completion.chunk",
+                            "created": created_timestamp,
+                            "model": model,
+                            "service_tier": "default",
+                            "system_fingerprint": None,
+                            "choices": [
+                                {
+                                    "index": 0,
+                                    "delta": {
+                                        "role": "assistant",
+                                        "tool_calls": []
+                                    },
+                                    "finish_reason": None
+                                }
+                            ]
+                        }
+
+                        # Agregar tool_calls iniciales con metadata
+                        for idx, tc in enumerate(tool_use):
+                            initial_chunk["choices"][0]["delta"]["tool_calls"].append({
+                                "index": idx,
+                                "id": tc.get("id"),
+                                "type": tc.get("type"),
+                                "function": {
+                                    "name": tc.get("function", {}).get("name"),
+                                    "arguments": ""
+                                }
+                            })
+
+                        yield f"data: {json.dumps(initial_chunk)}\n\n"
+
+                        # Emitir argumentos en chunks
+                        for idx, tc in enumerate(tool_use):
+                            arguments = tc.get("function", {}).get("arguments", "{}")
+                            
+                            # Dividir arguments en chunks pequeños
+                            chunk_size = 20
+                            for i in range(0, len(arguments), chunk_size):
+                                arg_chunk = arguments[i:i + chunk_size]
+                                
+                                arg_delta_chunk = {
+                                    "id": f"chatcmpl-{request_id}",
+                                    "object": "chat.completion.chunk",
+                                    "created": created_timestamp,
+                                    "model": model,
+                                    "service_tier": "default",
+                                    "system_fingerprint": None,
+                                    "choices": [
+                                        {
+                                            "index": 0,
+                                            "delta": {
+                                                "tool_calls": [
+                                                    {
+                                                        "index": idx,
+                                                        "function": {
+                                                            "arguments": arg_chunk
+                                                        }
+                                                    }
+                                                ]
+                                            },
+                                            "finish_reason": None
+                                        }
+                                    ]
+                                }
+                                yield f"data: {json.dumps(arg_delta_chunk)}\n\n"
+
+                        tool_calls_emitted = True
+
+                    # Extraer texto del chunk (si no hay tool_calls)
                     chunk_text = chunk.get('text') if isinstance(chunk, dict) else getattr(chunk, 'text', None)
 
-                    if chunk_text:
-                        # Chunk de contenido
+                    # Extraer texto del chunk (si no hay tool_calls)
+                    chunk_text = chunk.get('text') if isinstance(chunk, dict) else getattr(chunk, 'text', None)
+
+                    if chunk_text and not tool_use:
+                        # Chunk inicial con role (solo si no se emitió con tool_calls)
+                        if first_content_chunk:
+                            initial_chunk = {
+                                "id": f"chatcmpl-{request_id}",
+                                "object": "chat.completion.chunk",
+                                "created": created_timestamp,
+                                "model": model,
+                                "service_tier": "default",
+                                "system_fingerprint": None,
+                                "choices": [
+                                    {
+                                        "index": 0,
+                                        "delta": {
+                                            "role": "assistant",
+                                            "content": "",
+                                            "refusal": None
+                                        },
+                                        "finish_reason": None
+                                    }
+                                ]
+                            }
+                            yield f"data: {json.dumps(initial_chunk)}\n\n"
+                            first_content_chunk = False
+
+                        # Emitir el chunk de texto directamente (sin dividir por palabras)
+                        # Los chunks ya vienen en tamaño ~50 caracteres desde sai_llm.astreaming()
                         content_chunk = {
                             "id": f"chatcmpl-{request_id}",
                             "object": "chat.completion.chunk",
-                            "created": int(time.time()),
+                            "created": created_timestamp,
                             "model": model,
+                            "service_tier": "default",
+                            "system_fingerprint": None,
                             "choices": [
                                 {
                                     "index": 0,
@@ -703,14 +865,6 @@ class OpenAiSAIConverter:
                         }
                         yield f"data: {json.dumps(content_chunk)}\n\n"
 
-                    # Extraer usage
-                    usage = chunk.get('usage') if isinstance(chunk, dict) else getattr(chunk, 'usage', None)
-                    if usage:
-                        if isinstance(usage, dict):
-                            input_tokens = usage.get("prompt_tokens", 0) or input_tokens
-                            output_tokens = usage.get("completion_tokens", 0) or output_tokens
-                            total_tokens = usage.get("total_tokens", 0) or total_tokens
-
                     # Verificar si es el último chunk
                     is_finished = chunk.get('is_finished') if isinstance(chunk, dict) else getattr(chunk, 'is_finished', False)
                     if is_finished:
@@ -720,8 +874,10 @@ class OpenAiSAIConverter:
                         final_chunk = {
                             "id": f"chatcmpl-{request_id}",
                             "object": "chat.completion.chunk",
-                            "created": int(time.time()),
+                            "created": created_timestamp,
                             "model": model,
+                            "service_tier": "default",
+                            "system_fingerprint": None,
                             "choices": [
                                 {
                                     "index": 0,
@@ -762,7 +918,7 @@ class OpenAiSAIConverter:
                                        messages: list, kwargs: dict, model: str):
         """
         Maneja requests a /v1/responses sin streaming.
-        
+
         Compatible con OpenAI Responses API y Codex CLI.
 
         Args:
@@ -777,7 +933,14 @@ class OpenAiSAIConverter:
             JSONResponse: Respuesta en formato OpenAI Responses API
         """
         logger.info(f"🚀 [{request_id}] Llamando a sai_llm.acompletion()...")
+
+        # Timestamp de inicio
+        created_at = int(time.time())
+
         litellm_response = await sai_llm.acompletion(messages=messages, **kwargs)
+
+        # Timestamp de finalización
+        completed_at = int(time.time())
 
         # Extraer texto
         text = ""
@@ -810,48 +973,98 @@ class OpenAiSAIConverter:
                 }
                 finish_reason = finish_reason_map.get(litellm_finish, "end_turn")
 
-        # Construir respuesta en formato OpenAI Responses API
+        # Construir respuesta en formato OpenAI Responses API completo
         response = {
             "id": response_id,
-            "type": "response",
+            "object": "response",
+            "created_at": created_at,
+            "status": "completed",
+            "background": False,
+            "billing": {
+                "payer": "developer"
+            },
+            "completed_at": completed_at,
+            "error": None,
+            "frequency_penalty": kwargs.get("frequency_penalty", 0.0),
+            "incomplete_details": None,
+            "instructions": None,
+            "max_output_tokens": kwargs.get("max_tokens"),
+            "max_tool_calls": None,
             "model": model,
-            "created": int(time.time()),
             "output": [
                 {
                     "id": output_item_id,
                     "type": "message",
-                    "role": "assistant",
+                    "status": "completed",
                     "content": [
                         {
-                            "type": "text",
+                            "type": "output_text",
+                            "annotations": [],
+                            "logprobs": [],
                             "text": text
                         }
                     ],
-                    "stop_reason": finish_reason
+                    "role": "assistant"
                 }
             ],
+            "parallel_tool_calls": True,
+            "presence_penalty": kwargs.get("presence_penalty", 0.0),
+            "previous_response_id": None,
+            "prompt_cache_key": None,
+            "prompt_cache_retention": None,
+            "reasoning": {
+                "effort": None,
+                "summary": None
+            },
+            "safety_identifier": None,
+            "service_tier": "default",
+            "store": True,
+            "temperature": kwargs.get("temperature", 1.0),
+            "text": {
+                "format": {
+                    "type": "text"
+                },
+                "verbosity": "medium"
+            },
+            "tool_choice": kwargs.get("tool_choice", "auto"),
+            "tools": kwargs.get("tools", []),
+            "top_logprobs": 0,
+            "top_p": kwargs.get("top_p", 1.0),
+            "truncation": "disabled",
             "usage": {
                 "input_tokens": usage_dict.get("prompt_tokens", 0),
-                "cached_input_tokens": 0,
+                "input_tokens_details": {
+                    "cached_tokens": 0
+                },
                 "output_tokens": usage_dict.get("completion_tokens", 0),
-                "reasoning_output_tokens": 0,
+                "output_tokens_details": {
+                    "reasoning_tokens": 0
+                },
                 "total_tokens": usage_dict.get("total_tokens", 0)
-            }
+            },
+            "user": None,
+            "metadata": {}
         }
 
         logger.info(
             f"✅ [{request_id}] Respuesta lista | "
             f"Output tokens: {usage_dict.get('completion_tokens', 0)} | "
-            f"Stop reason: {finish_reason}"
+            f"Stop reason: {finish_reason} | "
+            f"Duration: {completed_at - created_at}s"
         )
 
-        return JSONResponse(content=response)
+        # Retornar JSON formateado con indentación
+        return Response(
+            content=json.dumps(response, indent=2, ensure_ascii=False) + "\n",
+            media_type="application/json",
+            headers={"Content-Type": "application/json; charset=utf-8"}
+        )
 
     async def _responses_streaming(self, request_id: str, response_id: str, output_item_id: str,
                                    messages: list, kwargs: dict, model: str):
         """
         Maneja requests a /v1/responses con streaming SSE.
-        
+
         Compatible con OpenAI Responses API y Codex CLI.
         Emite eventos canónicos:
         - response.created
@@ -875,13 +1088,109 @@ class OpenAiSAIConverter:
         async def event_generator() -> AsyncIterator[str]:
             try:
                 # 🔥 EVENTO CANÓNICO: response.created
+                # Timestamp de creación
+                created_at = int(time.time())
+                
                 created_event = {
                     "type": "response.created",
-                    "response_id": response_id,
-                    "model": model
+                    "response": {
+                        "id": response_id,
+                        "object": "response",
+                        "created_at": created_at,
+                        "status": "in_progress",
+                        "background": False,
+                        "completed_at": None,
+                        "error": None,
+                        "frequency_penalty": kwargs.get("frequency_penalty", 0.0),
+                        "incomplete_details": None,
+                        "instructions": kwargs.get("instructions"),
+                        "max_output_tokens": kwargs.get("max_tokens"),
+                        "max_tool_calls": None,
+                        "model": model,
+                        "output": [],
+                        "parallel_tool_calls": True,
+                        "presence_penalty": kwargs.get("presence_penalty", 0.0),
+                        "previous_response_id": None,
+                        "prompt_cache_key": None,
+                        "prompt_cache_retention": None,
+                        "reasoning": {
+                            "effort": None,
+                            "summary": None
+                        },
+                        "safety_identifier": None,
+                        "service_tier": "auto",
+                        "store": True,
+                        "temperature": kwargs.get("temperature", 1.0),
+                        "text": {
+                            "format": {
+                                "type": "text"
+                            },
+                            "verbosity": "medium"
+                        },
+                        "tool_choice": kwargs.get("tool_choice", "auto"),
+                        "tools": kwargs.get("tools", []),
+                        "top_logprobs": 0,
+                        "top_p": kwargs.get("top_p", 1.0),
+                        "truncation": "disabled",
+                        "usage": None,
+                        "user": None,
+                        "metadata": {}
+                    },
+                    "sequence_number": 0
                 }
                 yield "event: response.created\n"
                 yield f"data: {json.dumps(created_event)}\n\n"
+
+                # 🔥 EVENTO CANÓNICO: response.in_progress
+                in_progress_event = {
+                    "type": "response.in_progress",
+                    "response": {
+                        "id": response_id,
+                        "object": "response",
+                        "created_at": created_at,
+                        "status": "in_progress",
+                        "background": False,
+                        "completed_at": None,
+                        "error": None,
+                        "frequency_penalty": kwargs.get("frequency_penalty", 0.0),
+                        "incomplete_details": None,
+                        "instructions": kwargs.get("instructions"),
+                        "max_output_tokens": kwargs.get("max_tokens"),
+                        "max_tool_calls": None,
+                        "model": model,
+                        "output": [],
+                        "parallel_tool_calls": True,
+                        "presence_penalty": kwargs.get("presence_penalty", 0.0),
+                        "previous_response_id": None,
+                        "prompt_cache_key": None,
+                        "prompt_cache_retention": None,
+                        "reasoning": {
+                            "effort": None,
+                            "summary": None
+                        },
+                        "safety_identifier": None,
+                        "service_tier": "auto",
+                        "store": True,
+                        "temperature": kwargs.get("temperature", 1.0),
+                        "text": {
+                            "format": {
+                                "type": "text"
+                            },
+                            "verbosity": "medium"
+                        },
+                        "tool_choice": kwargs.get("tool_choice", "auto"),
+                        "tools": kwargs.get("tools", []),
+                        "top_logprobs": 0,
+                        "top_p": kwargs.get("top_p", 1.0),
+                        "truncation": "disabled",
+                        "usage": None,
+                        "user": None,
+                        "metadata": {}
+                    },
+                    "sequence_number": 1
+                }
+                yield "event: response.in_progress\n"
+                yield f"data: {json.dumps(in_progress_event)}\n\n"
 
                 logger.info(f"🌊 [{request_id}] Iniciando streaming SSE...")
 
@@ -912,6 +1221,20 @@ class OpenAiSAIConverter:
                 }
                 yield "event: response.output_item.added\n"
                 yield f"data: {json.dumps(output_item_added)}\n\n"
+
+                # 🔥 EVENTO CANÓNICO: response.content_part.added (después de output_item.added)
+                # Algunos clientes esperan este evento antes de comenzar a recibir deltas.
+                content_part_added = {
+                    "type": "response.content_part.added",
+                    "item_id": output_item_id,
+                    "part": {
+                        "type": "output_text",
+                        "text": ""
+                    },
+                    "index": 0
+                }
+                yield "event: response.content_part.added\n"
+                yield f"data: {json.dumps(content_part_added)}\n\n"
 
                 try:
                     async for chunk in sai_llm.astreaming(messages=messages, **kwargs):
@@ -993,14 +1316,60 @@ class OpenAiSAIConverter:
                     f"Total chars: {len(total_text)}"
                 )
 
+                # 🔥 EVENTO CANÓNICO: response.output_text.done (debe ir antes de content_part.done)
+                output_text_done = {
+                    "type": "response.output_text.done",
+                    "item_id": output_item_id,
+                    "index": 0,
+                    "text": total_text
+                }
+                yield "event: response.output_text.done\n"
+                yield f"data: {json.dumps(output_text_done)}\n\n"
+
+                # 🔥 EVENTO CANÓNICO: response.content_part.done (antes de output_item.done)
+                content_part_done = {
+                    "type": "response.content_part.done",
+                    "item_id": output_item_id,
+                    "index": 0,
+                    "part": {
+                        "type": "output_text",
+                        "text": total_text
+                    }
+                }
+                yield "event: response.content_part.done\n"
+                yield f"data: {json.dumps(content_part_done)}\n\n"
+
                 # 🔥 EVENTO: output_item.done
                 output_item_done = {
                     "type": "response.output_item.done",
-                    "response_id": response_id,
-                    "item_id": output_item_id
+                    "item": {
+                        "id": output_item_id,
+                        "type": "message",
+                        "status": "completed",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "annotations": [],
+                                "logprobs": [],
+                                "text": total_text
+                            }
+                        ],
+                        "role": "assistant"
+                    },
+                    "output_index": 0,
+                    "sequence_number": 7
                 }
                 yield "event: response.output_item.done\n"
                 yield f"data: {json.dumps(output_item_done)}\n\n"
+
+                # 🔥 EVENTO CANÓNICO (compat): response.completed
+                # Algunos clientes esperan este evento antes del evento final response.done.
+                completed_event = {
+                    "type": "response.completed",
+                    "response_id": response_id
+                }
+                yield "event: response.completed\n"
+                yield f"data: {json.dumps(completed_event)}\n\n"
 
                 # 🔥 EVENTO FINAL OBLIGATORIO: response.done
                 done_event = {
@@ -1366,53 +1735,298 @@ class SAILLM(CustomLLM):
         # Validar estructura de mensajes
         self._validate_message_structure(messages)
 
-        # Extraer system prompt si existe
+        # Extraer system prompt si existe (soportar tanto "system" como "developer")
         system_prompt = ""
         processed_messages = messages
 
-        if messages and messages[0].get("role") == "system":
+        if messages and messages[0].get("role") in ("system", "developer"):
             system_prompt = messages[0].get("content", "")
             processed_messages = messages[1:]
+            logger.info(
+                f"📋 [{request_id}] System prompt detectado | "
+                f"Rol: {messages[0].get('role')} | "
+                f"Longitud: {len(system_prompt)} chars"
+            )
+
+        # Extraer tool prompt (último mensaje con role="tool")
+        tool_prompt = ""
+        tool_call_id = None
+        last_tool_idx = -1
+        
+        # Buscar el último mensaje tool
+        for idx in range(len(processed_messages) - 1, -1, -1):
+            msg = processed_messages[idx]
+            if msg.get("role") == "tool":
+                tool_prompt = msg.get("content", "")
+                tool_call_id = msg.get("tool_call_id", "unknown")
+                last_tool_idx = idx
+                logger.info(
+                    f"🔧 [{request_id}] Tool prompt detectado | "
+                    f"Tool call ID: {tool_call_id} | "
+                    f"Índice: {idx} | "
+                    f"Longitud: {len(tool_prompt)} chars"
+                )
+                break
+
+        # Extraer user prompt (último mensaje que NO sea tool)
+        user_prompt = ""
+        last_user_idx = -1
+        
+        # Buscar el último mensaje de usuario (ignorando mensajes tool)
+        for idx in range(len(processed_messages) - 1, -1, -1):
+            msg = processed_messages[idx]
+            if msg.get("role") != "tool":
+                user_prompt = msg.get("content", "")
+                last_user_idx = idx
+                logger.info(
+                    f"📝 [{request_id}] User prompt detectado | "
+                    f"Índice: {idx} | "
+                    f"Longitud: {len(user_prompt)} chars"
+                )
+                break
+        
+        # Determinar qué mensajes van al historial
+        # Excluir tanto el último user como el último tool
+        indices_to_exclude = set()
+        if last_user_idx >= 0:
+            indices_to_exclude.add(last_user_idx)
+        if last_tool_idx >= 0:
+            indices_to_exclude.add(last_tool_idx)
+        
+        chat_messages_raw = [
+            msg for idx, msg in enumerate(processed_messages)
+            if idx not in indices_to_exclude
+        ]
 
         # Convertir mensajes al formato esperado por SAI
-        chat_messages = self._convert_to_sai_format(processed_messages)
+        chat_messages = []
+        for idx, msg in enumerate(chat_messages_raw):
+            role = msg.get("role")
+            content = msg.get("content", "")
+            
+            # Los mensajes tool que NO son el último se agregan al historial como user
+            if role == "tool":
+                tc_id = msg.get("tool_call_id", "unknown")
+                tool_content = f"[Tool Response - ID: {tc_id}]\n{content}"
+                
+                chat_messages.append({
+                    "content": tool_content,
+                    "role": "user",
+                    "id": int(time.time() * 1000) + idx
+                })
+                
+                logger.info(
+                    f"🔧 [{request_id}] Mensaje tool histórico procesado | "
+                    f"Tool call ID: {tc_id} | "
+                    f"Content length: {len(content)} chars"
+                )
+            else:
+                # Mensaje normal (assistant, user, etc.)
+                chat_messages.append({
+                    "content": content,
+                    "role": role,
+                    "id": int(time.time() * 1000) + idx
+                })
 
         # Validar tamaño del contexto
         self._check_context_size(total_chars, request_id)
 
-        return system_prompt, chat_messages
+        return system_prompt, user_prompt, tool_prompt, tool_call_id, chat_messages
+
+    def _extract_tool_calls_from_plain_text_end(
+            self,
+            response_text: Optional[str],
+            request_id: str
+    ) -> tuple[Optional[list], str]:
+        """
+        Extrae un JSON al FINAL de la respuesta plana con {"tool_calls":[...]}.
+        Evita el bug de rfind("{") cuando hay "{...}" dentro de strings (p.ej. arguments).
+        Devuelve (tool_calls_normalizadas, texto_sin_json).
+        """
+        if response_text is None:
+            logger.info(f"🧪 [{request_id}] [TOOLS] extractor: response_text=None")
+            return None, ""
+
+        text = str(response_text)
+
+        # Logs "antes"
+        tail_preview = text[-500:] if len(text) > 500 else text
+        logger.info(f"🧪 [{request_id}] [TOOLS] BEFORE extracted | len={len(text)} | tail_preview={tail_preview!r}")
+
+        trimmed = text.rstrip()
+        if not trimmed:
+            logger.info(f"🧪 [{request_id}] [TOOLS] extractor: trimmed vacío")
+            return None, ""
+
+        if not trimmed.endswith("}"):
+            logger.info(f"[{request_id}] [TOOLS] extractor: no termina en '}}' -> no hay JSON final")
+            return None, text
+
+        decoder = json.JSONDecoder()
+
+        def _normalize_tool_calls(tool_calls) -> Optional[list]:
+            # ... existing code ...
+            if not tool_calls:
+                return None
+            if not isinstance(tool_calls, list):
+                tool_calls = [tool_calls]
+
+            normalized = []
+            for i, tc in enumerate(tool_calls):
+                if not isinstance(tc, dict):
+                    continue
+
+                # A) Estilo OpenAI-ish
+                if tc.get("type") == "function" and isinstance(tc.get("function"), dict):
+                    fn = tc.get("function") or {}
+                    name = fn.get("name")
+                    arguments = fn.get("arguments", "{}")
+                # B) Estilo compacto
+                else:
+                    name = tc.get("name")
+                    arguments = tc.get("arguments", "{}")
+
+                if not name:
+                    continue
+
+                normalized.append({
+                    "id": tc.get("id", f"call_{request_id}_{i}"),
+                    "type": "function",
+                    "function": {
+                        "name": name,
+                        "arguments": arguments if isinstance(arguments, str) else json.dumps(arguments, ensure_ascii=False)
+                    }
+                })
+            return normalized or None
+
+        def _try_parse_from(start_idx: int) -> tuple[Optional[list], Optional[int], Optional[int], Optional[str]]:
+            # ... existing code ...
+            candidate = trimmed[start_idx:]
+            try:
+                obj, end = decoder.raw_decode(candidate)
+            except Exception:
+                return None, None, None, None
+
+            # Debe consumir todo el final salvo whitespace
+            if candidate[end:].strip():
+                return None, None, None, None
+
+            if not (isinstance(obj, dict) and "tool_calls" in obj):
+                return None, None, None, None
+
+            tool_calls = _normalize_tool_calls(obj.get("tool_calls"))
+            if not tool_calls:
+                return None, None, None, None
+
+            json_raw = candidate[:end]
+            return tool_calls, start_idx, start_idx + end, json_raw
+
+        # 1) Camino rápido: buscar el marcador {"tool_calls" desde el final
+        marker_idx = trimmed.rfind('{"tool_calls"')
+        if marker_idx != -1:
+            tool_calls, js, je, json_raw = _try_parse_from(marker_idx)
+            if tool_calls:
+                cleaned = trimmed[:js].rstrip()
+
+                # Logs "después" (AFTER)
+                after_tail = cleaned[-500:] if len(cleaned) > 500 else cleaned
+                logger.info(
+                    f"🧪 [{request_id}] [TOOLS] AFTER extracted | "
+                    f"cleaned_len={len(cleaned)} | "
+                    f"tool_calls_count={len(tool_calls)} | "
+                    f"json_removed_len={len(json_raw)} | "
+                    f"cleaned_tail_preview={after_tail!r}"
+                )
+
+                print(f"[{request_id}] [TOOLS] FOUND via marker at {marker_idx} | tool_calls_count={len(tool_calls)} | json_len={len(json_raw)}")
+                print(f"[{request_id}] [TOOLS] AFTER cleaned_len={len(cleaned)} cleaned_tail_preview={after_tail!r}")
+                return tool_calls, cleaned
+
+        # 2) Fallback: escanear todos los '{' hacia atrás (evita caer en '{' dentro de strings)
+        brace_positions = [i for i, ch in enumerate(trimmed) if ch == "{"]
+
+        logger.info(f"🧪 [{request_id}] [TOOLS] fallback scan: brace_positions={len(brace_positions)}")
+
+        for start_idx in reversed(brace_positions):
+            tool_calls, js, je, json_raw = _try_parse_from(start_idx)
+            if tool_calls:
+                cleaned = trimmed[:js].rstrip()
+
+                # Logs "después" (AFTER)
+                after_tail = cleaned[-500:] if len(cleaned) > 500 else cleaned
+                logger.info(
+                    f"🧪 [{request_id}] [TOOLS] AFTER extracted | "
+                    f"cleaned_len={len(cleaned)} | "
+                    f"tool_calls_count={len(tool_calls)} | "
+                    f"json_removed_len={len(json_raw)} | "
+                    f"cleaned_tail_preview={after_tail!r}"
+                )
+
+                print(f"[{request_id}] [TOOLS] FOUND via scan at {start_idx} | tool_calls_count={len(tool_calls)} | json_len={len(json_raw)}")
+                print(f"[{request_id}] [TOOLS] AFTER cleaned_len={len(cleaned)} cleaned_tail_preview={after_tail!r}")
+                return tool_calls, cleaned
+
+        # No se encontró JSON tool_calls al final
+        logger.info(f"🧪 [{request_id}] [TOOLS] extractor: NO tool_calls JSON encontrado al final")
+        return None, text
 
     # ---------------- Síncrono ----------------
     def completion(self, messages=None, **kwargs) -> ModelResponse:
-        request_id = str(uuid.uuid4())[:8]  # Usar solo los primeros 8 caracteres para legibilidad
+        request_id = str(uuid.uuid4())[:8]
 
-        # Log detallado de kwargs solo si VERBOSE_LOGGING está activado
         if VERBOSE_LOGGING:
             logger.debug(f"⚙️ [{request_id}] kwargs recibidos en completion: {kwargs}")
 
         if not messages:
             raise ValueError("Se requiere al menos un mensaje")
 
-        # Extraer user_api_key si existe
         user_api_key = self._extract_user_api_key(kwargs, request_id)
-
-        # Extraer user-agent si existe
         user_agent = self._extract_user_agent(kwargs, request_id)
 
-        system, chat_messages = self._prepare_messages(messages, request_id)
+        # Tools (si vienen desde gateway/converter)
+        tools = kwargs.get("tools")
+        # Omitir si es lista vacía
+        if tools is not None and isinstance(tools, list) and len(tools) == 0:
+            tools = None
+            logger.info(f"🔧 [{request_id}] [TOOLS] tools es lista vacía [] - omitiendo para evitar falsos positivos")
+        
+        # NUEVA LÓGICA: Detectar si hay mensajes con role="tool"
+        has_tool_messages = any(msg.get("role") == "tool" for msg in messages if isinstance(msg, dict))
+        if has_tool_messages and tools is not None:
+            logger.info(
+                f"🔧 [{request_id}] [TOOLS] Mensajes con role='tool' detectados | "
+                f"Acción: Eliminando tools de la entrada (se espera respuesta, no tool_calls)"
+            )
+            tools = None
+        
+        has_tools = bool(tools)  # Guardar si hay tools en la entrada
+        if has_tools:
+            print(f"[{request_id}] [TOOLS] completion(): tools recibidas count={len(tools)}")
 
-        if not messages:
-            raise ValueError("No hay mensajes para procesar después de extraer system prompt")
+        system, user_prompt, tool_prompt, tool_call_id, chat_messages = self._prepare_messages(messages, request_id)
 
-        prompt = messages[-1]["content"]
         response_text, finish_reason, usage_data = self._call_sai(
-            system, prompt, chat_messages, request_id, user_api_key=user_api_key, model=kwargs.get('model')
+            system,
+            user_prompt,
+            tool_prompt,
+            tool_call_id,
+            chat_messages,
+            request_id,
+            user_api_key=user_api_key,
+            model=kwargs.get('model'),
+            tools=tools
         )
 
-        # Crear ModelResponse condicionalmente según user-agent
-        if user_agent and ('GitKraken' in user_agent or 'Go-http-client' in user_agent):
-            # GitKraken o Go-http-client detectado: NO asignar text, SÍ asignar message.content
-            client_type = "GitKraken" if "GitKraken" in user_agent else "Go-http-client"
+        # SOLO extraer tool_calls si se enviaron tools en la entrada
+        tool_calls = None
+        cleaned_text = response_text
+        
+        if has_tools:
+            tool_calls, cleaned_text = self._extract_tool_calls_from_plain_text_end(response_text, request_id)
+        else:
+            logger.info(f"🧪 [{request_id}] [TOOLS] completion(): NO tools en entrada -> extractor OMITIDO")
+
+        if tool_calls:
             response = ModelResponse(
                 usage={
                     "prompt_tokens": usage_data["prompt_tokens"],
@@ -1420,24 +2034,36 @@ class SAILLM(CustomLLM):
                     "total_tokens": usage_data["total_tokens"]
                 }
             )
-            response.choices[0].message.content = response_text
+            # CORRECCIÓN: content debe ser None (null en JSON), no string vacío
+            response.choices[0].message.content = None  # ← Cambio aquí
+            response.choices[0].message.tool_calls = tool_calls
+            response.choices[0].finish_reason = "tool_calls"
+            response.model = usage_data["model"]
+            return response
+
+        # BUGFIX: Siempre asignar a message.content para compatibilidad con OpenAI Chat Completions
+        # Solo usar .text para casos legacy específicos
+        response = ModelResponse(
+            usage={
+                "prompt_tokens": usage_data["prompt_tokens"],
+                "completion_tokens": usage_data["completion_tokens"],
+                "total_tokens": usage_data["total_tokens"]
+            }
+        )
+        response.choices[0].message.content = cleaned_text
+        
+        # Para compatibilidad con clientes legacy que esperan .text
+        if not (user_agent and ('GitKraken' in user_agent or 'Go-http-client' in user_agent)):
+            response.text = cleaned_text
             logger.info(
-                f"✅ [{request_id}] [USER-AGENT] {client_type} detectado | "
-                f"NO se asigna text | SÍ se asigna response.choices[0].message.content"
+                f"✅ [{request_id}] [RESPONSE] Asignado a message.content Y text | "
+                f"Longitud: {len(cleaned_text)} chars"
             )
         else:
-            # GitKraken/Go-http-client NO detectado: SÍ asignar text, NO asignar message.content
-            response = ModelResponse(
-                text=response_text,
-                usage={
-                    "prompt_tokens": usage_data["prompt_tokens"],
-                    "completion_tokens": usage_data["completion_tokens"],
-                    "total_tokens": usage_data["total_tokens"]
-                }
-            )
             logger.info(
-                f"ℹ️ [{request_id}] [USER-AGENT] GitKraken/Go-http-client NO detectado | "
-                f"SÍ se asigna text | NO se asigna response.choices[0].message.content"
+                f"✅ [{request_id}] [RESPONSE] Asignado solo a message.content | "
+                f"User-Agent: {user_agent} | "
+                f"Longitud: {len(cleaned_text)} chars"
             )
 
         response.choices[0].finish_reason = finish_reason
@@ -1447,50 +2073,78 @@ class SAILLM(CustomLLM):
 
     # ---------------- Asíncrono ----------------
     async def acompletion(self, messages=None, **kwargs) -> ModelResponse:
-        # Usar request_id de kwargs si existe (viene de astreaming), o generar uno nuevo
         request_id = kwargs.pop('_request_id', None) or str(uuid.uuid4())[:8]
 
-        # Log detallado de kwargs solo si VERBOSE_LOGGING está activado
         if VERBOSE_LOGGING:
             logger.debug(f"⚙️ [{request_id}] kwargs recibidos en acompletion: {kwargs}")
 
         if not messages:
             raise ValueError("Se requiere al menos un mensaje")
 
-        # Extraer user_api_key si existe
         user_api_key = self._extract_user_api_key(kwargs, request_id)
-
-        # Extraer user-agent si existe
         user_agent = self._extract_user_agent(kwargs, request_id)
-
-        # Extraer model si existe
         model = kwargs.get('model')
 
-        system, chat_messages = self._prepare_messages(messages, request_id)
+        tools = kwargs.get("tools")
+        # Omitir si es lista vacía
+        if tools is not None and isinstance(tools, list) and len(tools) == 0:
+            tools = None
+            logger.info(f"🔧 [{request_id}] [TOOLS] tools es lista vacía [] - omitiendo para evitar falsos positivos")
+        
+        # NUEVA LÓGICA: Detectar si hay mensajes con role="tool"
+        has_tool_messages = any(msg.get("role") == "tool" for msg in messages if isinstance(msg, dict))
+        if has_tool_messages and tools is not None:
+            logger.info(
+                f"🔧 [{request_id}] [TOOLS] Mensajes con role='tool' detectados | "
+                f"Acción: Eliminando tools de la entrada (se espera respuesta, no tool_calls)"
+            )
+            tools = None
+        
+        has_tools = bool(tools)  # Guardar si hay tools en la entrada
+        logger.info(f"🧪 [{request_id}] [TOOLS] acompletion(): tools_present={has_tools} tools_type={type(tools).__name__ if tools else 'None'}")
 
-        if not messages:
-            raise ValueError("No hay mensajes para procesar después de extraer system prompt")
+        system, user_prompt, tool_prompt, tool_call_id, chat_messages = self._prepare_messages(messages, request_id)
 
-        prompt = messages[-1]["content"]
         loop = asyncio.get_running_loop()
 
-        # Crear una función parcial que incluya user_api_key y model
         from functools import partial
-        call_sai_with_params = partial(self._call_sai, user_api_key=user_api_key, model=model)
+        call_sai_with_params = partial(
+            self._call_sai, 
+            user_api_key=user_api_key, 
+            model=model, 
+            tools=tools
+        )
 
         response_text, finish_reason, usage_data = await loop.run_in_executor(
             None,
             call_sai_with_params,
             system,
-            prompt,
+            user_prompt,
+            tool_prompt,
+            tool_call_id,
             chat_messages,
             request_id
         )
 
-        # Crear ModelResponse condicionalmente según user-agent
-        if user_agent and ('GitKraken' in user_agent or 'Go-http-client' in user_agent):
-            # GitKraken o Go-http-client detectado: NO asignar text, SÍ asignar message.content
-            client_type = "GitKraken" if "GitKraken" in user_agent else "Go-http-client"
+        # Log explícito de llegada de respuesta
+        resp_tail = str(response_text)[-400:] if response_text else ""
+        logger.info(
+            f"🧪 [{request_id}] [TOOLS] acompletion(): response_text_len={len(str(response_text)) if response_text is not None else 0} "
+            f"resp_tail={resp_tail!r}"
+        )
+
+        # SOLO extraer tool_calls si se enviaron tools en la entrada
+        tool_calls = None
+        cleaned_text = response_text
+        
+        if has_tools:
+            tool_calls, cleaned_text = self._extract_tool_calls_from_plain_text_end(response_text, request_id)
+        else:
+            logger.info(f"🧪 [{request_id}] [TOOLS] acompletion(): NO tools en entrada -> extractor OMITIDO")
+
+        logger.info(f"🧪 [{request_id}] [TOOLS] acompletion(): extracted_tool_calls={bool(tool_calls)} cleaned_len={len(cleaned_text)}")
+
+        if tool_calls:
             response = ModelResponse(
                 usage={
                     "prompt_tokens": usage_data["prompt_tokens"],
@@ -1498,29 +2152,40 @@ class SAILLM(CustomLLM):
                     "total_tokens": usage_data["total_tokens"]
                 }
             )
-            response.choices[0].message.content = response_text
+            response.choices[0].message.content = None  # ← Cambio aquí
+            response.choices[0].message.tool_calls = tool_calls
+            response.choices[0].finish_reason = "tool_calls"
+            response.model = usage_data["model"]
+
+            return response
+
+        # BUGFIX: Siempre asignar a message.content para compatibilidad con OpenAI Chat Completions
+        # Solo usar .text para casos legacy específicos
+        response = ModelResponse(
+            usage={
+                "prompt_tokens": usage_data["prompt_tokens"],
+                "completion_tokens": usage_data["completion_tokens"],
+                "total_tokens": usage_data["total_tokens"]
+            }
+        )
+        response.choices[0].message.content = cleaned_text
+        
+        # Para compatibilidad con clientes legacy que esperan .text
+        if not (user_agent and ('GitKraken' in user_agent or 'Go-http-client' in user_agent)):
+            response.text = cleaned_text
             logger.info(
-                f"✅ [{request_id}] [USER-AGENT] {client_type} detectado | "
-                f"NO se asigna text | SÍ se asigna response.choices[0].message.content"
+                f"✅ [{request_id}] [RESPONSE] Asignado a message.content Y text | "
+                f"Longitud: {len(cleaned_text)} chars"
             )
         else:
-            # GitKraken/Go-http-client NO detectado: SÍ asignar text, NO asignar message.content
-            response = ModelResponse(
-                text=response_text,
-                usage={
-                    "prompt_tokens": usage_data["prompt_tokens"],
-                    "completion_tokens": usage_data["completion_tokens"],
-                    "total_tokens": usage_data["total_tokens"]
-                }
-            )
             logger.info(
-                f"ℹ️ [{request_id}] [USER-AGENT] GitKraken/Go-http-client NO detectado | "
-                f"SÍ se asigna text | NO se asigna response.choices[0].message.content"
+                f"✅ [{request_id}] [RESPONSE] Asignado solo a message.content | "
+                f"User-Agent: {user_agent} | "
+                f"Longitud: {len(cleaned_text)} chars"
             )
 
         response.choices[0].finish_reason = finish_reason
         response.model = usage_data["model"]
-
         return response
 
     # ---------------- Streaming ----------------
@@ -1537,35 +2202,99 @@ class SAILLM(CustomLLM):
 
         response = await self.acompletion(messages, **kwargs)
 
-        # BUGFIX: Extraer texto de response (puede estar en .text o en .choices[0].message.content)
+        # Extraer texto y tool_calls de la respuesta
         text = None
-        if hasattr(response, 'text') and response.text:
-            text = response.text
-        elif hasattr(response, 'choices') and response.choices:
+        tool_calls = None
+    
+        if hasattr(response, 'choices') and response.choices:
             choice = response.choices[0]
-            if hasattr(choice, 'message') and hasattr(choice.message, 'content'):
-                text = choice.message.content
+        
+            if hasattr(choice, 'message'):
+                # Extraer tool_calls si existen
+                if hasattr(choice.message, 'tool_calls') and choice.message.tool_calls:
+                    tool_calls = choice.message.tool_calls
+                    logger.info(
+                        f"🔧 [{request_id}] [STREAMING] Response contiene tool_calls | "
+                        f"Count: {len(tool_calls)}"
+                    )
+                
+                # Extraer content (puede coexistir con tool_calls)
+                if hasattr(choice.message, 'content') and choice.message.content:
+                    text = choice.message.content
+        elif hasattr(response, 'text') and response.text:
+            text = response.text
 
-        if not text:
-            logger.error(f"❌ [{request_id}] [STREAMING] No se pudo extraer texto de la respuesta")
+        # Validar que haya al menos texto o tool_calls
+        if not text and not tool_calls:
+            logger.error(
+                f"❌ [{request_id}] [STREAMING] No se pudo extraer ni texto ni tool_calls de la respuesta | "
+                f"response.choices existe: {hasattr(response, 'choices')} | "
+                f"response.text existe: {hasattr(response, 'text')} | "
+                f"Tipo de response: {type(response).__name__}"
+            )
             return
 
         usage_dict = response.usage.__dict__ if not isinstance(response.usage, dict) else response.usage
-
         finish_reason = response.choices[0].finish_reason
 
-        for idx, start in enumerate(range(0, len(text), CHUNK_SIZE)):
-            chunk_text = text[start:start + CHUNK_SIZE]
-            await asyncio.sleep(0.001)  # Reducido de 0.01s a 0.001s para mayor velocidad
-            is_final = start + CHUNK_SIZE >= len(text)
+        # Si hay tool_calls, emitir un chunk especial con tool_use
+        if tool_calls:
+            logger.info(
+                f"🔧 [{request_id}] [STREAMING] Emitiendo chunk con tool_calls | "
+                f"Count: {len(tool_calls)} | "
+                f"Tiene texto adicional: {bool(text)}"
+            )
+            
+            # Convertir tool_calls a formato serializable
+            tool_calls_list = []
+            for tc in tool_calls:
+                if hasattr(tc, '__dict__'):
+                    tc_dict = {
+                        "id": getattr(tc, 'id', f"call_{request_id}"),
+                        "type": getattr(tc, 'type', 'function'),
+                        "function": {
+                            "name": getattr(tc.function, 'name', '') if hasattr(tc, 'function') else '',
+                            "arguments": getattr(tc.function, 'arguments', '{}') if hasattr(tc, 'function') else '{}'
+                        }
+                    }
+                else:
+                    tc_dict = tc
+                tool_calls_list.append(tc_dict)
+            
+            # Emitir chunk con tool_calls (sin texto)
             yield GenericStreamingChunk(
-                text=chunk_text,
-                index=idx,
-                is_finished=is_final,
-                finish_reason=finish_reason if is_final else None,
-                tool_use=None,
+                text="",
+                index=0,
+                is_finished=not text,  # Solo es final si no hay texto adicional
+                finish_reason=finish_reason if not text else None,
+                tool_use=tool_calls_list,
                 usage=usage_dict
             )
+
+        # Si hay texto, emitirlo en chunks (puede ser adicional a tool_calls)
+        if text:
+            logger.info(
+                f"📝 [{request_id}] [STREAMING] Emitiendo texto en chunks | "
+                f"Longitud: {len(text)} chars | "
+                f"Chunk size: {CHUNK_SIZE} | "
+                f"Tiene tool_calls previos: {bool(tool_calls)}"
+            )
+            
+            start_index = 1 if tool_calls else 0  # Ajustar índice si ya se emitió chunk de tool_calls
+            
+            for idx, start in enumerate(range(0, len(text), CHUNK_SIZE), start=start_index):
+                chunk_text = text[start:start + CHUNK_SIZE]
+                await asyncio.sleep(0.001)
+                is_final = start + CHUNK_SIZE >= len(text)
+                
+                yield GenericStreamingChunk(
+                    text=chunk_text,
+                    index=idx,
+                    is_finished=is_final,
+                    finish_reason=finish_reason if is_final else None,
+                    tool_use=None,
+                    usage=usage_dict if is_final else None
+                )
 
     # ---------------- Métodos auxiliares para reducir complejidad ----------------
     def _determine_auth_method(self, user_api_key: Optional[str], request_id: str) -> tuple[Optional[str], Optional[str], str]:
@@ -2020,10 +2749,13 @@ class SAILLM(CustomLLM):
         return None, None
 
     # ---------------- Llamada privada a SAI (refactorizada) ----------------
-    def _call_sai(self, system: str, user: str, chat_messages: list, request_id: str, user_api_key: Optional[str] = None, model: Optional[str] = None) -> tuple[str, str, dict]:
+    def _call_sai(self, system: str, user: str, tool: str, tool_call_id: Optional[str], 
+                  chat_messages: list, request_id: str,
+                  user_api_key: Optional[str] = None, model: Optional[str] = None, 
+                  tools: Optional = None) -> tuple[str, str, dict]:
         # Construir URL base
         url = f"{SAI_URL}/api/templates/{SAI_TEMPLATE_ID}/execute"
-        
+
         # Agregar modelOverride si se proporciona un modelo
         if model:
             url = f"{url}?modelOverride={model}"
@@ -2032,10 +2764,53 @@ class SAILLM(CustomLLM):
                 f"Modelo solicitado: {model} | "
                 f"URL: {url}"
             )
+
+        # Construir inputs con system, user, tool y tools
+        data = {
+            "inputs": {
+                "system": system,
+                "user": user,
+                "tool": tool if tool else None,  # Agregar tool message
+                "tools": None  # tools definitions (se llenará después)
+            }
+        }
         
-        data = {"inputs":{"system":system,"user":user}}
         if chat_messages:
             data["chatMessages"] = chat_messages
+
+        # Serializar tools definitions como JSON string
+        tools_json_str = None
+        if tools is None:
+            tools_json_str = None
+            logger.debug(f"[{request_id}] [TOOLS] _call_sai(): tools=None -> inputs.tools=None")
+        elif isinstance(tools, list) and len(tools) == 0:
+            tools_json_str = None
+            logger.info(f"🔧 [{request_id}] [TOOLS] _call_sai(): tools=[] (lista vacía) -> inputs.tools=None (omitido)")
+        elif isinstance(tools, str):
+            tools_json_str = tools
+            try:
+                json.loads(tools_json_str)
+                logger.debug(f"[{request_id}] [TOOLS] _call_sai(): tools ya es JSON string válido (len={len(tools_json_str)})")
+            except Exception as e:
+                logger.warning(f"⚠️ [{request_id}] [TOOLS] _call_sai(): WARNING tools es string pero NO es JSON válido: {type(e).__name__}: {str(e)}")
+        else:
+            tools_json_str = json.dumps(tools, ensure_ascii=False)
+            logger.debug(f"[{request_id}] [TOOLS] _call_sai(): tools serializadas a JSON string (len={len(tools_json_str)})")
+
+        data["inputs"]["tools"] = tools_json_str
+
+        # Logging de tool message si existe
+        if tool:
+            logger.info(
+                f"🔧 [{request_id}] [TOOL] Tool message incluido en inputs.tool | "
+                f"Tool call ID: {tool_call_id} | "
+                f"Longitud: {len(tool)} chars"
+            )
+            if VERBOSE_LOGGING:
+                logger.debug(f"[{request_id}] [TOOL] inputs.tool preview={tool[:180]!r}")
+
+        if tools_json_str and VERBOSE_LOGGING:
+            logger.debug(f"[{request_id}] [TOOLS] inputs.tools preview={tools_json_str[:180]!r}")
 
         # Determinar método de autenticación
         custom_cookie, api_key_to_use, auth_type = self._determine_auth_method(user_api_key, request_id)
@@ -2046,13 +2821,14 @@ class SAILLM(CustomLLM):
                 f"🐍 [SERVER → SAI] [{request_id}] Preparando request | "
                 f"System: {len(system)} chars | "
                 f"User: {len(user)} chars | "
+                f"Tool: {len(tool) if tool else 0} chars | "
                 f"Historial: {len(chat_messages)} mensajes | "
                 f"Template: {SAI_TEMPLATE_ID} | "
                 f"Auth: {auth_type}"
             )
 
         if VERBOSE_LOGGING:
-            logger.debug(f"[{request_id}] Payload completo:\n{data}")
+            logger.debug(f"[{request_id}] Payload completo:\n{json.dumps(data, indent=2, ensure_ascii=False)}")
 
         # Ejecutar request con reintentos
         response, response_headers, auth_method_used = self._execute_request_with_retry(
