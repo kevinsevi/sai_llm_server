@@ -2035,7 +2035,7 @@ class SAILLM(CustomLLM):
                 }
             )
             # CORRECCIÓN: content debe ser None (null en JSON), no string vacío
-            response.choices[0].message.content = None  # ← Cambio aquí
+            response.choices[0].message.content = cleaned_text
             response.choices[0].message.tool_calls = tool_calls
             response.choices[0].finish_reason = "tool_calls"
             response.model = usage_data["model"]
@@ -2152,7 +2152,7 @@ class SAILLM(CustomLLM):
                     "total_tokens": usage_data["total_tokens"]
                 }
             )
-            response.choices[0].message.content = None  # ← Cambio aquí
+            response.choices[0].message.content = cleaned_text  # ← Cambio aquí
             response.choices[0].message.tool_calls = tool_calls
             response.choices[0].finish_reason = "tool_calls"
             response.model = usage_data["model"]
