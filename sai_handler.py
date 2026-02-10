@@ -2221,8 +2221,14 @@ class SAILLM(CustomLLM):
                 # Extraer content (puede coexistir con tool_calls)
                 if hasattr(choice.message, 'content') and choice.message.content:
                     text = choice.message.content
+                    logger.info(
+                        f"choice.message.content: {bool(text)}"
+                    )
         elif hasattr(response, 'text') and response.text:
             text = response.text
+            logger.info(
+                f"response.text: {bool(text)}"
+            )
 
         # Validar que haya al menos texto o tool_calls
         if not text and not tool_calls:

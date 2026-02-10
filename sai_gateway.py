@@ -216,11 +216,18 @@ async def chat_completions_endpoint(request: Request):
         stream = _normalize_bool(body.get("stream", False))
         model = body.get("model", "claude-sonnet-4-5-20250929")
         messages_input = body.get("messages", [])
+        tools = body.get("tools")  # Extraer tools si existen
+
+        # Omitir tools si es una lista vacía
+        if tools is not None and isinstance(tools, list) and len(tools) == 0:
+            tools = None
+            logger.info(f"🔧 [{request_id}] tools es lista vacía [] - omitiendo para evitar falsos positivos")
 
         logger.info(
             f"📊 [{request_id}] Model: {model} | "
             f"Messages: {len(messages_input)} | "
-            f"Stream: {stream}"
+            f"Stream: {stream} | "
+            f"Tools: {len(tools) if tools else 0}"
         )
 
         # Validar messages
@@ -240,6 +247,10 @@ async def chat_completions_endpoint(request: Request):
             "top_p": body.get("top_p"),
             "stop": body.get("stop")
         }
+
+        # Agregar tools si existen
+        if tools:
+            openai_body["tools"] = tools
 
         messages, kwargs = converter.openai_to_litellm(openai_body)
 
