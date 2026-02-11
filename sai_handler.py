@@ -920,17 +920,6 @@ class OpenAiSAIConverter:
         Maneja requests a /v1/responses sin streaming.
 
         Compatible con OpenAI Responses API y Codex CLI.
-
-        Args:
-            request_id: ID único de la solicitud
-            response_id: ID de la respuesta
-            output_item_id: ID del item de salida
-            messages: Lista de mensajes procesados
-            kwargs: Parámetros adicionales para LiteLLM
-            model: Nombre del modelo
-
-        Returns:
-            JSONResponse: Respuesta en formato OpenAI Responses API
         """
         logger.info(f"🚀 [{request_id}] Llamando a sai_llm.acompletion()...")
 
@@ -942,14 +931,27 @@ class OpenAiSAIConverter:
         # Timestamp de finalización
         completed_at = int(time.time())
 
-        # Extraer texto
+        # Extraer texto y tool_calls
         text = ""
-        if hasattr(litellm_response, 'text') and litellm_response.text:
-            text = litellm_response.text
-        elif hasattr(litellm_response, 'choices') and litellm_response.choices:
+        tool_calls = None
+        
+        if hasattr(litellm_response, 'choices') and litellm_response.choices:
             choice = litellm_response.choices[0]
-            if hasattr(choice, 'message') and hasattr(choice.message, 'content'):
-                text = choice.message.content or ""
+            
+            # Extraer tool_calls si existen
+            if hasattr(choice, 'message'):
+                if hasattr(choice.message, 'tool_calls') and choice.message.tool_calls:
+                    tool_calls = choice.message.tool_calls
+                    logger.info(
+                        f"🔧 [{request_id}] [RESPONSES] Tool calls detectados | "
+                        f"Count: {len(tool_calls)}"
+                    )
+                
+                # Extraer content (puede coexistir con tool_calls)
+                if hasattr(choice.message, 'content'):
+                    text = choice.message.content or ""
+        elif hasattr(litellm_response, 'text') and litellm_response.text:
+            text = litellm_response.text
 
         # Extraer usage
         usage_dict = {}
@@ -968,10 +970,59 @@ class OpenAiSAIConverter:
                 litellm_finish = choice.finish_reason
                 finish_reason_map = {
                     "stop": "end_turn",
+                    "tool_calls": "tool_calls",
                     "length": "max_tokens",
                     "error": "error"
                 }
                 finish_reason = finish_reason_map.get(litellm_finish, "end_turn")
+
+        # Construir output según si hay tool_calls o texto
+        output = []
+        
+        if tool_calls:
+            # Formato para function_call (compatible con Responses API)
+            for tc in tool_calls:
+                if hasattr(tc, '__dict__'):
+                    tc_dict = {
+                        "id": getattr(tc, 'id', f"call_{request_id}"),
+                        "type": getattr(tc, 'type', 'function'),
+                        "function": {
+                            "name": getattr(tc.function, 'name', '') if hasattr(tc, 'function') else '',
+                            "arguments": getattr(tc.function, 'arguments', '{}') if hasattr(tc, 'function') else '{}'
+                        }
+                    }
+                else:
+                    tc_dict = tc
+                
+                output.append({
+                    "type": "function_call",
+                    "id": f"fc_{request_id}",
+                    "call_id": tc_dict.get("id"),
+                    "name": tc_dict.get("function", {}).get("name"),
+                    "arguments": tc_dict.get("function", {}).get("arguments"),
+                    "status": "completed"
+                })
+            
+            logger.info(
+                f"🔧 [{request_id}] [RESPONSES] Output con function_calls | "
+                f"Count: {len(output)}"
+            )
+        else:
+            # Formato para mensaje de texto normal
+            output.append({
+                "id": output_item_id,
+                "type": "message",
+                "status": "completed",
+                "content": [
+                    {
+                        "type": "output_text",
+                        "annotations": [],
+                        "logprobs": [],
+                        "text": text
+                    }
+                ],
+                "role": "assistant"
+            })
 
         # Construir respuesta en formato OpenAI Responses API completo
         response = {
@@ -991,22 +1042,7 @@ class OpenAiSAIConverter:
             "max_output_tokens": kwargs.get("max_tokens"),
             "max_tool_calls": None,
             "model": model,
-            "output": [
-                {
-                    "id": output_item_id,
-                    "type": "message",
-                    "status": "completed",
-                    "content": [
-                        {
-                            "type": "output_text",
-                            "annotations": [],
-                            "logprobs": [],
-                            "text": text
-                        }
-                    ],
-                    "role": "assistant"
-                }
-            ],
+            "output": output,
             "parallel_tool_calls": True,
             "presence_penalty": kwargs.get("presence_penalty", 0.0),
             "previous_response_id": None,
@@ -1049,7 +1085,7 @@ class OpenAiSAIConverter:
         logger.info(
             f"✅ [{request_id}] Respuesta lista | "
             f"Output tokens: {usage_dict.get('completion_tokens', 0)} | "
-            f"Stop reason: {finish_reason} | "
+            f"Output type: {'function_call' if tool_calls else 'message'} | "
             f"Duration: {completed_at - created_at}s"
         )
 
@@ -1201,6 +1237,11 @@ class OpenAiSAIConverter:
                 output_tokens = 0
                 finish_reason = "end_turn"
                 first_chunk_received = False
+                
+                # Variables para function_call streaming
+                function_call_emitted = False
+                function_name = None
+                function_arguments_buffer = ""
 
                 # Llamar a SAI streaming
                 logger.info(f"🚀 [{request_id}] Llamando a sai_llm.astreaming()...")
@@ -1247,7 +1288,142 @@ class OpenAiSAIConverter:
                             logger.info(f"📦 [{request_id}] Primer chunk recibido de SAI")
                             first_chunk_received = True
 
-                        # Extraer texto del chunk
+                        # Extraer tool_use del chunk
+                        tool_use = chunk.get('tool_use') if isinstance(chunk, dict) else getattr(chunk, 'tool_use', None)
+
+                        # 🔧 NUEVO: Soporte para function_call streaming
+                        if tool_use and not function_call_emitted:
+                            # Detectar si es un solo tool_call (function_call legacy)
+                            if len(tool_use) == 1:
+                                tc = tool_use[0]
+                                function_name = tc.get("function", {}).get("name")
+                                function_arguments = tc.get("function", {}).get("arguments", "{}")
+
+                                logger.info(
+                                    f"🔧 [{request_id}] [FUNCTION_CALL] Detectado function_call único | "
+                                    f"Name: {function_name} | "
+                                    f"Arguments length: {len(function_arguments)}"
+                                )
+
+                                # Emitir evento function_call.started
+                                function_call_started = {
+                                    "type": "response.function_call.started",
+                                    "item_id": output_item_id,
+                                    "call_id": tc.get("id", f"call_{request_id}"),
+                                    "name": function_name
+                                }
+                                yield "event: response.function_call.started\n"
+                                yield f"data: {json.dumps(function_call_started)}\n\n"
+
+                                # Emitir argumentos en chunks pequeños
+                                chunk_size = 20
+                                for i in range(0, len(function_arguments), chunk_size):
+                                    arg_chunk = function_arguments[i:i + chunk_size]
+                                    function_arguments_buffer += arg_chunk
+
+                                    function_call_delta = {
+                                        "type": "response.function_call.arguments.delta",
+                                        "item_id": output_item_id,
+                                        "call_id": tc.get("id", f"call_{request_id}"),
+                                        "delta": arg_chunk
+                                    }
+                                    yield "event: response.function_call.arguments.delta\n"
+                                    yield f"data: {json.dumps(function_call_delta)}\n\n"
+
+                                # Emitir evento function_call.completed
+                                function_call_completed = {
+                                    "type": "response.function_call.completed",
+                                    "item_id": output_item_id,
+                                    "call_id": tc.get("id", f"call_{request_id}"),
+                                    "name": function_name,
+                                    "arguments": function_arguments
+                                }
+                                yield "event: response.function_call.completed\n"
+                                yield f"data: {json.dumps(function_call_completed)}\n\n"
+
+                                function_call_emitted = True
+                                finish_reason = "function_call"
+
+                            else:
+                                # Múltiples tool_calls - usar formato tool_calls estándar
+                                logger.info(
+                                    f"🔧 [{request_id}] [TOOL_CALLS] Detectados múltiples tool_calls | "
+                                    f"Count: {len(tool_use)}"
+                                )
+
+                                # Chunk inicial con role
+                                initial_chunk = {
+                                    "id": f"chatcmpl-{request_id}",
+                                    "object": "chat.completion.chunk",
+                                    "created": created_at,
+                                    "model": model,
+                                    "service_tier": "default",
+                                    "system_fingerprint": None,
+                                    "choices": [
+                                        {
+                                            "index": 0,
+                                            "delta": {
+                                                "role": "assistant",
+                                                "tool_calls": []
+                                            },
+                                            "finish_reason": None
+                                        }
+                                    ]
+                                }
+
+                                # Agregar tool_calls iniciales con metadata
+                                for idx, tc in enumerate(tool_use):
+                                    initial_chunk["choices"][0]["delta"]["tool_calls"].append({
+                                        "index": idx,
+                                        "id": tc.get("id"),
+                                        "type": tc.get("type"),
+                                        "function": {
+                                            "name": tc.get("function", {}).get("name"),
+                                            "arguments": ""
+                                        }
+                                    })
+
+                                yield f"data: {json.dumps(initial_chunk)}\n\n"
+
+                                # Emitir argumentos en chunks
+                                for idx, tc in enumerate(tool_use):
+                                    arguments = tc.get("function", {}).get("arguments", "{}")
+
+                                    # Dividir arguments en chunks pequeños
+                                    chunk_size = 20
+                                    for i in range(0, len(arguments), chunk_size):
+                                        arg_chunk = arguments[i:i + chunk_size]
+
+                                        arg_delta_chunk = {
+                                            "id": f"chatcmpl-{request_id}",
+                                            "object": "chat.completion.chunk",
+                                            "created": created_at,
+                                            "model": model,
+                                            "service_tier": "default",
+                                            "system_fingerprint": None,
+                                            "choices": [
+                                                {
+                                                    "index": 0,
+                                                    "delta": {
+                                                        "tool_calls": [
+                                                            {
+                                                                "index": idx,
+                                                                "function": {
+                                                                    "arguments": arg_chunk
+                                                                }
+                                                            }
+                                                        ]
+                                                    },
+                                                    "finish_reason": None
+                                                }
+                                            ]
+                                        }
+                                        yield f"data: {json.dumps(arg_delta_chunk)}\n\n"
+
+                                function_call_emitted = True
+                                finish_reason = "tool_calls"
+
+                        # Extraer texto del chunk (si no hay tool_calls)
                         chunk_text = chunk.get('text') if isinstance(chunk, dict) else getattr(chunk, 'text', None)
 
                         if VERBOSE_LOGGING:
@@ -1257,8 +1433,7 @@ class OpenAiSAIConverter:
                                 f"Text length: {len(chunk_text) if chunk_text else 0}"
                             )
 
-                        # Emitir delta de texto si hay contenido
-                        if chunk_text:
+                        if chunk_text and not tool_use:
                             total_text += chunk_text
 
                             # 🔥 FORMATO CODEX CLI: OutputTextDelta
@@ -1286,7 +1461,7 @@ class OpenAiSAIConverter:
 
                         # Extraer finish_reason
                         chunk_finish_reason = chunk.get('finish_reason') if isinstance(chunk, dict) else getattr(chunk, 'finish_reason', None)
-                        if chunk_finish_reason:
+                        if chunk_finish_reason and not function_call_emitted:
                             finish_reason_map = {
                                 "stop": "end_turn",
                                 "length": "max_tokens",
@@ -1313,31 +1488,33 @@ class OpenAiSAIConverter:
                 logger.info(
                     f"📦 [{request_id}] Streaming completado | "
                     f"Chunks: {chunk_count} | "
-                    f"Total chars: {len(total_text)}"
+                    f"Total chars: {len(total_text)} | "
+                    f"Function call: {function_call_emitted}"
                 )
 
-                # 🔥 EVENTO CANÓNICO: response.output_text.done (debe ir antes de content_part.done)
-                output_text_done = {
-                    "type": "response.output_text.done",
-                    "item_id": output_item_id,
-                    "index": 0,
-                    "text": total_text
-                }
-                yield "event: response.output_text.done\n"
-                yield f"data: {json.dumps(output_text_done)}\n\n"
-
-                # 🔥 EVENTO CANÓNICO: response.content_part.done (antes de output_item.done)
-                content_part_done = {
-                    "type": "response.content_part.done",
-                    "item_id": output_item_id,
-                    "index": 0,
-                    "part": {
-                        "type": "output_text",
+                # 🔥 EVENTO CANÓNICO: response.output_text.done (solo si hay texto)
+                if total_text:
+                    output_text_done = {
+                        "type": "response.output_text.done",
+                        "item_id": output_item_id,
+                        "index": 0,
                         "text": total_text
                     }
-                }
-                yield "event: response.content_part.done\n"
-                yield f"data: {json.dumps(content_part_done)}\n\n"
+                    yield "event: response.output_text.done\n"
+                    yield f"data: {json.dumps(output_text_done)}\n\n"
+
+                    # 🔥 EVENTO CANÓNICO: response.content_part.done
+                    content_part_done = {
+                        "type": "response.content_part.done",
+                        "item_id": output_item_id,
+                        "index": 0,
+                        "part": {
+                            "type": "output_text",
+                            "text": total_text
+                        }
+                    }
+                    yield "event: response.content_part.done\n"
+                    yield f"data: {json.dumps(content_part_done)}\n\n"
 
                 # 🔥 EVENTO: output_item.done
                 output_item_done = {
@@ -1359,6 +1536,14 @@ class OpenAiSAIConverter:
                     "output_index": 0,
                     "sequence_number": 7
                 }
+
+                # Si hubo function_call, agregar al output_item
+                if function_call_emitted and function_name:
+                    output_item_done["item"]["function_call"] = {
+                        "name": function_name,
+                        "arguments": function_arguments_buffer
+                    }
+
                 yield "event: response.output_item.done\n"
                 yield f"data: {json.dumps(output_item_done)}\n\n"
 
@@ -1389,7 +1574,8 @@ class OpenAiSAIConverter:
                 logger.info(
                     f"✅ [{request_id}] Stream finalizando | "
                     f"Input tokens: {input_tokens} | "
-                    f"Output tokens: {output_tokens}"
+                    f"Output tokens: {output_tokens} | "
+                    f"Finish reason: {finish_reason}"
                 )
 
                 return
