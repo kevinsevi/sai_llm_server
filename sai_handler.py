@@ -1097,7 +1097,7 @@ class OpenAiSAIConverter:
         )
 
     async def _responses_streaming(self, request_id: str, response_id: str, output_item_id: str,
-                                   messages: list, kwargs: dict, model: str):
+                                   messages: list, kwargs: dict, model: str, has_reasoning=False):
         """
         Maneja requests a /v1/responses con streaming SSE.
 
@@ -1246,11 +1246,15 @@ class OpenAiSAIConverter:
                 # Llamar a SAI streaming
                 logger.info(f"🚀 [{request_id}] Llamando a sai_llm.astreaming()...")
 
+                # 🔥 EVENTO CANÓNICO: response.output_item.added
+                # Determinar el tipo de item según has_reasoning
+                item_type = "reasoning" if has_reasoning else "message"
+
                 output_item_added = {
                     "type": "response.output_item.added",
                     "item": {
                         "id": output_item_id,
-                        "type": "message",
+                        "type": item_type,
                         "role": "assistant",
                         "content": [
                             {
@@ -1262,6 +1266,23 @@ class OpenAiSAIConverter:
                 }
                 yield "event: response.output_item.added\n"
                 yield f"data: {json.dumps(output_item_added)}\n\n"
+
+                output_item_done = {
+                    "type": "response.output_item.done",
+                    "item": {
+                        "id": output_item_id,
+                        "type": item_type,
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": ""
+                            }
+                        ]
+                    }
+                }
+                yield "event: response.output_item.done\n"
+                yield f"data: {json.dumps(output_item_done)}\n\n"
 
                 # 🔥 EVENTO CANÓNICO: response.content_part.added (después de output_item.added)
                 # Algunos clientes esperan este evento antes de comenzar a recibir deltas.

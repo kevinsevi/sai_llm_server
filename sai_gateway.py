@@ -393,20 +393,26 @@ async def messages_endpoint(request: Request):
 async def responses_endpoint(request: Request):
     """
     Endpoint compatible con OpenAI Responses API (con streaming SSE).
-    
+
     Implementa el formato oficial de OpenAI Responses API utilizado por
     herramientas como Codex CLI. Emite eventos SSE durante el streaming.
 
     Eventos SSE emitidos:
         - response.created: Inicio del response
-        - response.output_text.delta: Deltas de texto incrementales
+        - response.in_progress: Response en progreso (si include reasoning)
+        - response.output_item.added: Item de salida agregado
         - response.output_item.done: Item de salida completado
+        - response.output_text.delta: Deltas de texto incrementales
+        - response.output_text.done: Texto de salida completado
+        - response.content_part.added: Parte de contenido agregada
+        - response.content_part.done: Parte de contenido completada
         - response.done: Response finalizado (evento final correcto según spec)
 
     Request Body:
         messages (list): Lista de mensajes con 'role' y 'content'
         input (str, optional): Alternativa a messages para prompt simple
         stream (bool, optional): Si es True, retorna streaming SSE. Default: False
+        include (list, optional): Lista de campos adicionales a incluir (ej: ["reasoning.encrypted_content"])
         model (str, optional): ID del modelo
         max_tokens (int, optional): Máximo de tokens a generar
         temperature (float, optional): Temperatura de sampling
@@ -418,10 +424,10 @@ async def responses_endpoint(request: Request):
 
     Returns:
         StreamingResponse o JSONResponse: Response en formato OpenAI Responses API
-        
+
     Raises:
         HTTPException: 400 si falta messages/input, 500 en errores internos
-        
+
     Note:
         v1.0.4: Corregido evento final de 'response.completed' a 'response.done'
         según especificación oficial de OpenAI.
@@ -440,9 +446,16 @@ async def responses_endpoint(request: Request):
         logger.debug(f"   - Authorization: {request.headers.get('authorization', 'NO PRESENTE')}")
         logger.debug(f"   - x-api-key: {request.headers.get('x-api-key', 'NO PRESENTE')}")
 
-        # Extraer parámetro stream
+        # Extraer parámetro stream e include
         stream = _normalize_bool(body.get("stream", False))
+        include = body.get("include", [])
+        has_reasoning = "reasoning.encrypted_content" in include
+        
         logger.info(f"🔀 [{request_id}] Modo: {'Streaming' if stream else 'No streaming'}")
+        if has_reasoning:
+            logger.info(f"🧠 [{request_id}] Reasoning habilitado")
+        else:
+            logger.info(f"🧠 [{request_id}] Reasoning deshabilitado")
 
         # Normalizar formato
         if "input" in body and "messages" not in body:
@@ -488,10 +501,14 @@ async def responses_endpoint(request: Request):
         # Decidir entre streaming y no streaming
         if stream:
             logger.info(f"🌊 [{request_id}] Modo streaming activado")
-            return await converter._responses_streaming(request_id, response_id, output_item_id, messages, kwargs, model)
+            return await converter._responses_streaming(
+                request_id, response_id, output_item_id, messages, kwargs, model, has_reasoning
+            )
         else:
             logger.info(f"📄 [{request_id}] Modo sin streaming")
-            return await converter._responses_non_streaming(request_id, response_id, output_item_id, messages, kwargs, model)
+            return await converter._responses_non_streaming(
+                request_id, response_id, output_item_id, messages, kwargs, model
+            )
 
     except HTTPException:
         raise
