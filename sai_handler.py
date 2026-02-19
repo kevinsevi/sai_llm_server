@@ -1049,7 +1049,7 @@ class OpenAiSAIConverter:
             "prompt_cache_key": None,
             "prompt_cache_retention": None,
             "reasoning": {
-                "effort": None,
+                "effort": "none",
                 "summary": None
             },
             "safety_identifier": None,
@@ -1150,7 +1150,7 @@ class OpenAiSAIConverter:
                         "prompt_cache_key": None,
                         "prompt_cache_retention": None,
                         "reasoning": {
-                            "effort": None,
+                            "effort": "none",
                             "summary": None
                         },
                         "safety_identifier": None,
@@ -1201,7 +1201,7 @@ class OpenAiSAIConverter:
                         "prompt_cache_key": None,
                         "prompt_cache_retention": None,
                         "reasoning": {
-                            "effort": None,
+                            "effort": "none",
                             "summary": None
                         },
                         "safety_identifier": None,
