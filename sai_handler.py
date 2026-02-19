@@ -1549,27 +1549,112 @@ class OpenAiSAIConverter:
 
                 # 🔥 EVENTO CANÓNICO (compat): response.completed
                 # Algunos clientes esperan este evento antes del evento final response.done.
+                completed_at = int(time.time())
+                
+                # Construir output según si hay tool_calls o texto
+                output = []
+                
+                if function_call_emitted and function_name:
+                    # Formato para function_call
+                    output.append({
+                        "type": "function_call",
+                        "id": f"fc_{request_id}",
+                        "call_id": f"call_{request_id}",
+                        "name": function_name,
+                        "arguments": function_arguments_buffer,
+                        "status": "completed"
+                    })
+                else:
+                    # Formato para mensaje de texto normal
+                    output.append({
+                        "id": output_item_id,
+                        "type": "message",
+                        "status": "completed",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "annotations": [],
+                                "logprobs": [],
+                                "text": total_text
+                            }
+                        ],
+                        "role": "assistant"
+                    })
+                
                 completed_event = {
                     "type": "response.completed",
-                    "response_id": response_id
+                    "response": {
+                        "id": response_id,
+                        "object": "response",
+                        "created_at": created_at,
+                        "completed_at": completed_at,
+                        "status": "completed",
+                        "background": False,
+                        "error": None,
+                        "frequency_penalty": kwargs.get("frequency_penalty", 0.0),
+                        "incomplete_details": None,
+                        "instructions": kwargs.get("instructions"),
+                        "max_output_tokens": kwargs.get("max_tokens"),
+                        "max_tool_calls": None,
+                        "metadata": {},
+                        "model": model,
+                        "output": output,
+                        "parallel_tool_calls": True,
+                        "presence_penalty": kwargs.get("presence_penalty", 0.0),
+                        "previous_response_id": None,
+                        "prompt_cache_key": None,
+                        "prompt_cache_retention": None,
+                        "reasoning": {
+                            "effort": "none",
+                            "summary": None
+                        },
+                        "safety_identifier": None,
+                        "service_tier": "default",
+                        "store": True,
+                        "temperature": kwargs.get("temperature", 1.0),
+                        "text": {
+                            "format": {
+                                "type": "text"
+                            },
+                            "verbosity": "medium"
+                        },
+                        "tool_choice": kwargs.get("tool_choice", "auto"),
+                        "tools": kwargs.get("tools", []),
+                        "top_logprobs": 0,
+                        "top_p": kwargs.get("top_p", 0.98),
+                        "truncation": "disabled",
+                        "usage": {
+                            "input_tokens": input_tokens,
+                            "input_tokens_details": {
+                                "cached_tokens": 0
+                            },
+                            "output_tokens": output_tokens,
+                            "output_tokens_details": {
+                                "reasoning_tokens": 0
+                            },
+                            "total_tokens": input_tokens + output_tokens
+                        },
+                        "user": None
+                    },
+                    "sequence_number": 8
                 }
                 yield "event: response.completed\n"
                 yield f"data: {json.dumps(completed_event)}\n\n"
 
                 # 🔥 EVENTO FINAL OBLIGATORIO: response.done
-                done_event = {
-                    "type": "response.done",
-                    "response_id": response_id,
-                    "token_usage": {
-                        "input_tokens": input_tokens,
-                        "cached_input_tokens": 0,
-                        "output_tokens": output_tokens,
-                        "reasoning_output_tokens": 0,
-                        "total_tokens": input_tokens + output_tokens
-                    }
-                }
-                yield "event: response.done\n"
-                yield f"data: {json.dumps(done_event)}\n\n"
+                # done_event = {
+                #     "type": "response.done",
+                #     "response_id": response_id,
+                #     "token_usage": {
+                #         "input_tokens": input_tokens,
+                #         "cached_input_tokens": 0,
+                #         "output_tokens": output_tokens,
+                #         "reasoning_output_tokens": 0,
+                #         "total_tokens": input_tokens + output_tokens
+                #     }
+                # }
+                # yield "event: response.done\n"
+                # yield f"data: {json.dumps(done_event)}\n\n"
 
                 logger.info(
                     f"✅ [{request_id}] Stream finalizando | "
