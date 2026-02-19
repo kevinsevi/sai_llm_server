@@ -293,7 +293,7 @@ class OpenAiSAIConverter:
         kwargs = {
             "model": openai_request.get("model", "claude-sonnet-4-5-20250929"),
             "temperature": openai_request.get("temperature"),
-            "max_tokens": openai_request.get("max_tokens", 4096),
+            "max_tokens": openai_request.get("max_tokens"),
             "top_p": openai_request.get("top_p"),
             "top_k": openai_request.get("top_k"),
             "stop_sequences": openai_request.get("stop_sequences"),
