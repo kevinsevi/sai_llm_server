@@ -1,27 +1,4 @@
-"""
-sai_gateway.py - Gateway FastAPI para exponer SAI con APIs compatibles con OpenAI.
-
-Este servidor proporciona múltiples endpoints compatibles con diferentes
-formatos de la API de OpenAI:
-
-Endpoints principales:
-- POST /v1/completions: OpenAI Completions API (legacy) con soporte streaming
-- POST /v1/chat/completions: OpenAI Chat Completions API con soporte streaming
-- POST /v1/messages: OpenAI Messages API (sin streaming)
-- POST /v1/responses: OpenAI Responses API con streaming SSE (compatible con Codex CLI)
-- GET /v1/models: Lista de modelos disponibles
-- GET /v1/models/{model_id}: Detalles de un modelo específico
-- GET /health: Health check
-
-Características:
-- Todos los endpoints funcionan con o sin el prefijo /v1
-- Autenticación vía Authorization header (Bearer token) o x-api-key header
-- Conversión automática entre formatos OpenAI y LiteLLM
-- Logging detallado con request_id para trazabilidad
-- Manejo robusto de errores con HTTPException
-
-Versión: 1.0.4
-"""
+# sai_gateway.py
 
 import json
 import uuid
@@ -29,34 +6,13 @@ from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse
 import uvicorn
 
-from sai_handler import sai_llm, logger, converter
+from sai_handler import sai_llm, logger
+from sai_converter import converter
 from sai_models import get_models_list, get_model_by_id
 
 app = FastAPI(title="OpenAI SAI Gateway", version="1.0.4")
 
 def _normalize_bool(value) -> bool:
-    """
-    Normaliza un valor a booleano.
-    
-    Maneja múltiples tipos de entrada y convierte strings como "true"/"false"
-    a sus equivalentes booleanos.
-
-    Args:
-        value: Valor a normalizar. Puede ser bool, str, int o None.
-        
-    Returns:
-        bool: Valor normalizado a booleano.
-        
-    Examples:
-        >>> _normalize_bool(True)
-        True
-        >>> _normalize_bool("true")
-        True
-        >>> _normalize_bool("1")
-        True
-        >>> _normalize_bool(0)
-        False
-    """
     if isinstance(value, bool):
         return value
     if isinstance(value, str):
@@ -69,31 +25,6 @@ def _normalize_bool(value) -> bool:
 @app.post("/v1/completions")
 @app.post("/completions")
 async def completions_endpoint(request: Request):
-    """
-    Endpoint compatible con OpenAI Completions API (legacy).
-    
-    Acepta un prompt simple y retorna una completion. Soporta tanto
-    modo streaming como no streaming.
-
-    Request Body:
-        prompt (str): Texto del prompt
-        stream (bool, optional): Si es True, retorna streaming SSE. Default: False
-        model (str, optional): ID del modelo. Default: "claude-sonnet-4-5-20250929"
-        max_tokens (int, optional): Máximo de tokens a generar. Default: 4096
-        temperature (float, optional): Temperatura de sampling
-        top_p (float, optional): Nucleus sampling
-        stop (str|list, optional): Secuencias de parada
-
-    Headers:
-        Authorization: Bearer token (opcional)
-        x-api-key: API key alternativa (opcional)
-
-    Returns:
-        JSONResponse o StreamingResponse: Completion en formato OpenAI
-        
-    Raises:
-        HTTPException: 400 si falta el prompt, 500 en errores internos
-    """
     request_id = str(uuid.uuid4())[:8]
 
     try:
@@ -176,31 +107,6 @@ async def completions_endpoint(request: Request):
 @app.post("/v1/chat/completions")
 @app.post("/chat/completions")
 async def chat_completions_endpoint(request: Request):
-    """
-    Endpoint compatible con OpenAI Chat Completions API.
-    
-    Acepta una lista de mensajes en formato chat y retorna una completion.
-    Soporta tanto modo streaming como no streaming.
-
-    Request Body:
-        messages (list): Lista de mensajes con 'role' y 'content'
-        stream (bool, optional): Si es True, retorna streaming SSE. Default: False
-        model (str, optional): ID del modelo. Default: "claude-sonnet-4-5-20250929"
-        max_tokens (int, optional): Máximo de tokens a generar. Default: 4096
-        temperature (float, optional): Temperatura de sampling
-        top_p (float, optional): Nucleus sampling
-        stop (str|list, optional): Secuencias de parada
-
-    Headers:
-        Authorization: Bearer token (opcional)
-        x-api-key: API key alternativa (opcional)
-
-    Returns:
-        JSONResponse o StreamingResponse: Chat completion en formato OpenAI
-        
-    Raises:
-        HTTPException: 400 si falta messages, 500 en errores internos
-    """
     request_id = str(uuid.uuid4())[:8]
 
     try:
@@ -281,31 +187,6 @@ async def chat_completions_endpoint(request: Request):
 @app.post("/v1/messages")
 @app.post("/messages")
 async def messages_endpoint(request: Request):
-    """
-    Endpoint compatible con OpenAI Messages API (sin streaming).
-    
-    Acepta mensajes en formato OpenAI y retorna una respuesta completa
-    sin streaming. Si necesitas streaming, usa /v1/responses.
-
-    Request Body:
-        messages (list): Lista de mensajes con 'role' y 'content'
-        input (str, optional): Alternativa a messages para prompt simple
-        model (str, optional): ID del modelo
-        max_tokens (int, optional): Máximo de tokens a generar
-        temperature (float, optional): Temperatura de sampling
-        top_p (float, optional): Nucleus sampling
-
-    Headers:
-        Authorization: Bearer token (opcional)
-        x-api-key: API key alternativa (opcional)
-
-    Returns:
-        JSONResponse: Respuesta completa en formato OpenAI Messages
-        
-    Raises:
-        HTTPException: 400 si falta messages/input o si pide streaming,
-                      500 en errores internos
-    """
     request_id = str(uuid.uuid4())[:8]
 
     try:
@@ -391,49 +272,7 @@ async def messages_endpoint(request: Request):
 @app.post("/v1/responses")
 @app.post("/responses")
 async def responses_endpoint(request: Request):
-    """
-    Endpoint compatible con OpenAI Responses API (con streaming SSE).
-
-    Implementa el formato oficial de OpenAI Responses API utilizado por
-    herramientas como Codex CLI. Emite eventos SSE durante el streaming.
-
-    Eventos SSE emitidos:
-        - response.created: Inicio del response
-        - response.in_progress: Response en progreso (si include reasoning)
-        - response.output_item.added: Item de salida agregado
-        - response.output_item.done: Item de salida completado
-        - response.output_text.delta: Deltas de texto incrementales
-        - response.output_text.done: Texto de salida completado
-        - response.content_part.added: Parte de contenido agregada
-        - response.content_part.done: Parte de contenido completada
-        - response.done: Response finalizado (evento final correcto según spec)
-
-    Request Body:
-        messages (list): Lista de mensajes con 'role' y 'content'
-        input (str, optional): Alternativa a messages para prompt simple
-        stream (bool, optional): Si es True, retorna streaming SSE. Default: False
-        include (list, optional): Lista de campos adicionales a incluir (ej: ["reasoning.encrypted_content"])
-        model (str, optional): ID del modelo
-        max_tokens (int, optional): Máximo de tokens a generar
-        temperature (float, optional): Temperatura de sampling
-        top_p (float, optional): Nucleus sampling
-
-    Headers:
-        Authorization: Bearer token (opcional)
-        x-api-key: API key alternativa (opcional)
-
-    Returns:
-        StreamingResponse o JSONResponse: Response en formato OpenAI Responses API
-
-    Raises:
-        HTTPException: 400 si falta messages/input, 500 en errores internos
-
-    Note:
-        v1.0.4: Corregido evento final de 'response.completed' a 'response.done'
-        según especificación oficial de OpenAI.
-    """
     request_id = str(uuid.uuid4())[:8]
-    response_id = f"msg_{request_id}"
     output_item_id = f"item_{request_id}"
 
     try:
@@ -450,8 +289,18 @@ async def responses_endpoint(request: Request):
         stream = _normalize_bool(body.get("stream", False))
         include = body.get("include", [])
         has_reasoning = "reasoning.encrypted_content" in include
-        
+
+        # Verificar si hay function_call_output en input
+        input_data = body.get("input", [])
+        if isinstance(input_data, list):
+            for item in input_data:
+                if isinstance(item, dict) and item.get("type") == "function_call_output":
+                    has_reasoning = False
+                    logger.info(f"🔧 [{request_id}] function_call_output detectado - reasoning deshabilitado")
+                    break
+
         logger.info(f"🔀 [{request_id}] Modo: {'Streaming' if stream else 'No streaming'}")
+
         if has_reasoning:
             logger.info(f"🧠 [{request_id}] Reasoning habilitado")
         else:
@@ -502,12 +351,12 @@ async def responses_endpoint(request: Request):
         if stream:
             logger.info(f"🌊 [{request_id}] Modo streaming activado")
             return await converter._responses_streaming(
-                request_id, response_id, output_item_id, messages, kwargs, model, has_reasoning
+                request_id, output_item_id, messages, kwargs, model, has_reasoning
             )
         else:
             logger.info(f"📄 [{request_id}] Modo sin streaming")
             return await converter._responses_non_streaming(
-                request_id, response_id, output_item_id, messages, kwargs, model
+                request_id, output_item_id, messages, kwargs, model
             )
 
     except HTTPException:
@@ -520,27 +369,6 @@ async def responses_endpoint(request: Request):
 @app.get("/v1/models")
 @app.get("/models")
 async def models_endpoint():
-    """
-    Lista los modelos disponibles en formato OpenAI Models API.
-    
-    Retorna una lista de todos los modelos compatibles con SAI.
-    No requiere autenticación.
-
-    Returns:
-        JSONResponse: Lista de modelos en formato OpenAI con estructura:
-            {
-                "object": "list",
-                "data": [
-                    {
-                        "id": "model-id",
-                        "object": "model",
-                        "created": timestamp,
-                        "owned_by": "organization"
-                    },
-                    ...
-                ]
-            }
-    """
     logger.info("📋 GET /v1/models request recibido")
 
     models_data = get_models_list()
@@ -552,21 +380,6 @@ async def models_endpoint():
 @app.get("/v1/models/{model_id}")
 @app.get("/models/{model_id}")
 async def model_detail_endpoint(model_id: str):
-    """
-    Retorna detalles de un modelo específico.
-    
-    Consulta información detallada de un modelo por su ID.
-    No requiere autenticación.
-
-    Args:
-        model_id (str): ID del modelo a consultar
-        
-    Returns:
-        JSONResponse: Información del modelo en formato OpenAI
-        
-    Raises:
-        HTTPException: 404 si el modelo no existe
-    """
     logger.info(f"📋 GET /v1/models/{model_id} request recibido")
 
     model_info = get_model_by_id(model_id)
@@ -591,15 +404,6 @@ async def model_detail_endpoint(model_id: str):
 
 @app.get("/")
 async def root():
-    """
-    Documentación y metadata del gateway.
-    
-    Retorna información sobre el servicio, versión, endpoints disponibles
-    y notas de uso.
-    
-    Returns:
-        dict: Información completa del gateway incluyendo changelog y endpoints
-    """
     return {
         "service": "OpenAI SAI Gateway",
         "version": "1.0.4",
@@ -672,15 +476,6 @@ async def root():
 
 @app.get("/health")
 async def health_check():
-    """
-    Health check endpoint para monitoreo.
-    
-    Retorna el estado del servicio. Útil para load balancers y
-    sistemas de monitoreo.
-    
-    Returns:
-        dict: Estado del servicio con versión
-    """
     return {
         "status": "healthy",
         "service": "openai-sai-gateway",
@@ -715,15 +510,6 @@ if __name__ == "__main__":
     print("="*80 + "\n")
 
     def signal_handler(sig, frame):
-        """
-        Manejador de señal SIGINT (Ctrl+C).
-        
-        Permite detener el servidor limpiamente cuando se presiona Ctrl+C.
-        
-        Args:
-            sig: Señal recibida
-            frame: Frame actual de ejecución
-        """
         print("\n" + "="*80)
         logger.info("👋 Deteniendo gateway... (Ctrl+C recibido)")
         logger.info("✅ Gateway detenido exitosamente")
