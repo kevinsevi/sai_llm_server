@@ -1,9 +1,4 @@
-"""
-sai_models.py - Módulo compartido para la definición de modelos disponibles en SAI.
-
-Este módulo es usado tanto por sai_handler.py como por sai_gateway.py
-para mantener una única fuente de verdad sobre los modelos soportados.
-"""
+# sai_models.py
 
 # Lista de modelos disponibles en SAI
 # Nota: el "id" es el que expone la OpenAI Models API (/v1/models).
