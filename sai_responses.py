@@ -728,6 +728,7 @@ class ResponsesHandler:
             }
         )
 
+
 # ---------------- Instancia global ----------------
 responses_handler = ResponsesHandler()
 """Instancia global del handler de responses."""

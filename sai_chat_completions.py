@@ -316,5 +316,6 @@ class ChatCompletionsHandler:
             }
         )
 
+
 # Instancia global
 chat_completions_handler = ChatCompletionsHandler()

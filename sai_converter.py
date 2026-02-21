@@ -127,6 +127,7 @@ class OpenAiSAIConverter:
             }
         }
 
+
 # ---------------- Instancia global ----------------
 converter = OpenAiSAIConverter()
 """Instancia global del conversor de formatos OpenAI ↔ SAI."""

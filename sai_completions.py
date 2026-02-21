@@ -157,6 +157,7 @@ class CompletionsHandler:
             }
         )
 
+
 # Instancia global
 completions_handler = CompletionsHandler()
 """Instancia global del handler de Completions."""
