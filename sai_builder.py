@@ -156,7 +156,8 @@ class ResponseEventBuilder:
             item_type: str = "message",
             has_content: bool = True,
             call_id: str = None,
-            name: str = None
+            name: str = None,
+            sequence_number: int = 2
     ) -> dict:
         """
         Construye el evento response.output_item.added para streaming SSE.
@@ -167,6 +168,7 @@ class ResponseEventBuilder:
             has_content: Si el item debe incluir contenido inicial vacío (default: True)
             call_id: ID de la llamada para function_call (opcional)
             name: Nombre de la función para function_call (opcional)
+            sequence_number: Número de secuencia del evento (default: 2)
 
         Returns:
             dict: Evento response.output_item.added en formato OpenAI Responses API
@@ -198,7 +200,8 @@ class ResponseEventBuilder:
 
         return {
             "type": "response.output_item.added",
-            "item": item
+            "item": item,
+            "sequence_number": sequence_number
         }
 
     @staticmethod
@@ -224,11 +227,10 @@ class ResponseEventBuilder:
         Returns:
             dict: Evento response.output_item.done en formato OpenAI Responses API
         """
-        # Estructura base del evento
+        # Estructura base del evento (sin sequence_number)
         event = {
             "type": "response.output_item.done",
-            "output_index": output_index,
-            "sequence_number": sequence_number
+            "output_index": output_index
         }
 
         # Construir el item según el tipo
@@ -269,6 +271,9 @@ class ResponseEventBuilder:
 
         # Agregar el item al evento
         event["item"] = item
+        
+        # Agregar sequence_number al final
+        event["sequence_number"] = sequence_number
 
         return event
 
@@ -277,7 +282,8 @@ class ResponseEventBuilder:
             item_id: str,
             part_type: str = "output_text",
             text: str = "",
-            index: int = 0
+            index: int = 0,
+            sequence_number: int = 3
     ) -> dict:
         """
         Construye el evento response.content_part.added para streaming SSE.
@@ -287,6 +293,7 @@ class ResponseEventBuilder:
             part_type: Tipo de contenido ("output_text", "audio", etc.)
             text: Texto inicial del contenido (default: "")
             index: Índice del content part (default: 0)
+            sequence_number: Número de secuencia del evento (default: 3)
 
         Returns:
             dict: Evento response.content_part.added en formato OpenAI Responses API
@@ -298,14 +305,16 @@ class ResponseEventBuilder:
                 "type": part_type,
                 "text": text
             },
-            "index": index
+            "index": index,
+            "sequence_number": sequence_number
         }
 
     @staticmethod
     def build_response_function_call_started_event(
             item_id: str,
             call_id: str,
-            name: str
+            name: str,
+            sequence_number: int = 4
     ) -> dict:
         """
         Construye el evento response.function_call.started para streaming SSE.
@@ -314,6 +323,7 @@ class ResponseEventBuilder:
             item_id: ID del item de salida
             call_id: ID único de la llamada a función
             name: Nombre de la función que se está llamando
+            sequence_number: Número de secuencia del evento (default: 4)
 
         Returns:
             dict: Evento response.function_call.started en formato OpenAI Responses API
@@ -322,14 +332,16 @@ class ResponseEventBuilder:
             "type": "response.function_call.started",
             "item_id": item_id,
             "call_id": call_id,
-            "name": name
+            "name": name,
+            "sequence_number": sequence_number
         }
 
     @staticmethod
     def build_response_function_call_arguments_delta_event(
             item_id: str,
             delta: str,
-            call_id: str = None
+            call_id: str = None,
+            sequence_number: int = 5
     ) -> dict:
         """
         Construye el evento response.function_call.arguments.delta para streaming SSE.
@@ -338,6 +350,7 @@ class ResponseEventBuilder:
             item_id: ID del item de salida
             delta: Fragmento incremental de los argumentos JSON
             call_id: ID único de la llamada a función (opcional)
+            sequence_number: Número de secuencia del evento (default: 5)
 
         Returns:
             dict: Evento response.function_call.arguments.delta en formato OpenAI Responses API
@@ -345,7 +358,8 @@ class ResponseEventBuilder:
         event = {
             "type": "response.function_call.arguments.delta",
             "item_id": item_id,
-            "delta": delta
+            "delta": delta,
+            "sequence_number": sequence_number
         }
 
         # Solo agregar call_id si se proporciona
@@ -358,7 +372,8 @@ class ResponseEventBuilder:
     def build_response_output_text_done_event(
             item_id: str,
             text: str,
-            index: int = 0
+            index: int = 0,
+            sequence_number: int = 6
     ) -> dict:
         """
         Construye el evento response.output_text.done para streaming SSE.
@@ -367,6 +382,7 @@ class ResponseEventBuilder:
             item_id: ID del item de salida al que pertenece este texto
             text: Texto completo generado
             index: Índice del content part (default: 0)
+            sequence_number: Número de secuencia del evento (default: 6)
 
         Returns:
             dict: Evento response.output_text.done en formato OpenAI Responses API
@@ -375,7 +391,8 @@ class ResponseEventBuilder:
             "type": "response.output_text.done",
             "item_id": item_id,
             "index": index,
-            "text": text
+            "text": text,
+            "sequence_number": sequence_number
         }
 
     @staticmethod
@@ -415,7 +432,8 @@ class ResponseEventBuilder:
             item_id: str,
             call_id: str,
             name: str,
-            arguments: str
+            arguments: str,
+            sequence_number: int = 9
     ) -> dict:
         """
         Construye el evento response.function_call.completed para streaming SSE.
@@ -425,6 +443,7 @@ class ResponseEventBuilder:
             call_id: ID único de la llamada a función
             name: Nombre de la función ejecutada
             arguments: Argumentos JSON completos de la función
+            sequence_number: Número de secuencia del evento (default: 9)
 
         Returns:
             dict: Evento response.function_call.completed en formato OpenAI Responses API
@@ -434,13 +453,15 @@ class ResponseEventBuilder:
             "item_id": item_id,
             "call_id": call_id,
             "name": name,
-            "arguments": arguments
+            "arguments": arguments,
+            "sequence_number": sequence_number
         }
 
     @staticmethod
     def build_response_output_text_delta_event(
             item_id: str,
-            delta: str
+            delta: str,
+            sequence_number: int = 4
     ) -> dict:
         """
         Construye el evento response.output_text.delta para streaming SSE.
@@ -448,6 +469,7 @@ class ResponseEventBuilder:
         Args:
             item_id: ID del item de salida al que pertenece este delta
             delta: Fragmento incremental de texto
+            sequence_number: Número de secuencia del evento (default: 4)
 
         Returns:
             dict: Evento response.output_text.delta en formato OpenAI Responses API
@@ -455,7 +477,8 @@ class ResponseEventBuilder:
         return {
             "type": "response.output_text.delta",
             "item_id": item_id,
-            "delta": delta
+            "delta": delta,
+            "sequence_number": sequence_number
         }
 
     @staticmethod
@@ -463,7 +486,8 @@ class ResponseEventBuilder:
             item_id: str,
             text: str,
             index: int = 0,
-            part_type: str = "output_text"
+            part_type: str = "output_text",
+            sequence_number: int = 5
     ) -> dict:
         """
         Construye el evento response.content_part.done para streaming SSE.
@@ -473,6 +497,7 @@ class ResponseEventBuilder:
             text: Texto completo del contenido
             index: Índice del content part (default: 0)
             part_type: Tipo de contenido (default: "output_text")
+            sequence_number: Número de secuencia del evento (default: 5)
 
         Returns:
             dict: Evento response.content_part.done en formato OpenAI Responses API
@@ -484,7 +509,8 @@ class ResponseEventBuilder:
             "part": {
                 "type": part_type,
                 "text": text
-            }
+            },
+            "sequence_number": sequence_number
         }
 
     @staticmethod
