@@ -6,56 +6,13 @@ import uuid
 
 from sai_handler import sai_llm, logger, VERBOSE_LOGGING
 from sai_builder import event_builder
+from sai_extractor import text_extractor
 from starlette.responses import Response, StreamingResponse
 from typing import AsyncIterator
 
 
 # ---------------- Conversor de formatos OpenAI ----------------
 class OpenAiSAIConverter:
-    @staticmethod
-    def _extract_text_recursive(content) -> str:
-        # Caso 1: Ya es un string
-        if isinstance(content, str):
-            return content
-
-        # Caso 2: Es una lista
-        if isinstance(content, list):
-            texts = []
-            for item in content:
-                # Recursión para cada elemento de la lista
-                extracted = OpenAiSAIConverter._extract_text_recursive(item)
-                if extracted:
-                    texts.append(extracted)
-            return " ".join(texts)
-
-        # Caso 3: Es un diccionario
-        if isinstance(content, dict):
-            # Prioridad 1: Si tiene "text", usarlo directamente
-            if "text" in content:
-                return str(content["text"])
-
-            # Prioridad 2: Si tiene "content", recursión
-            if "content" in content:
-                return OpenAiSAIConverter._extract_text_recursive(content["content"])
-
-            # Prioridad 3: Si tiene "input_text" (formato Codex CLI)
-            if "input_text" in content:
-                return str(content["input_text"])
-
-            # Prioridad 4: Si tiene "output" (formato Codex CLI)
-            if "arguments" in content:
-                return "EJECUTADO: " + str(content["arguments"])
-
-            # Prioridad 4: Si tiene "output" (formato Codex CLI)
-            if "output" in content:
-                return "RESULTADO: " + str(content["output"])
-
-            # Si no tiene ninguno de los campos esperados, retornar vacío
-            return ""
-
-        # Caso 4: Otro tipo (None, int, etc.)
-        return ""
-
     @staticmethod
     def openai_to_litellm(openai_request: dict) -> tuple[list, dict]:
         messages = []
@@ -65,7 +22,7 @@ class OpenAiSAIConverter:
         instructions = openai_request.get("instructions")
         system_text = None
         if system_prompt:
-            system_text = OpenAiSAIConverter._extract_text_recursive(system_prompt)
+            system_text = text_extractor.extract_text_recursive(system_prompt)
 
         if instructions and system_text:
             system_text = system_text + "\n\n" + instructions
@@ -84,7 +41,7 @@ class OpenAiSAIConverter:
             content = msg.get("content")
 
             # Usar extracción recursiva para manejar cualquier nivel de anidación
-            text_content = OpenAiSAIConverter._extract_text_recursive(content)
+            text_content = text_extractor.extract_text_recursive(content)
 
             # Solo agregar si hay contenido real
             if text_content:
