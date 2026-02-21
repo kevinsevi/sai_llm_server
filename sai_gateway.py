@@ -8,6 +8,7 @@ import uvicorn
 
 from sai_handler import sai_llm, logger
 from sai_converter import converter
+from sai_completions import completions_handler
 from sai_models import get_models_list, get_model_by_id
 
 app = FastAPI(title="OpenAI SAI Gateway", version="1.0.4")
@@ -92,10 +93,10 @@ async def completions_endpoint(request: Request):
         # Decidir si es streaming o no
         if stream:
             logger.info(f"🌊 [{request_id}] Modo streaming activado")
-            return await converter._completions_streaming(request_id, messages, kwargs, model)
+            return await completions_handler.completions_streaming(request_id, messages, kwargs, model)
         else:
             logger.info(f"📄 [{request_id}] Modo sin streaming")
-            return await converter._completions_non_streaming(request_id, messages, kwargs, model)
+            return await completions_handler.completions_non_streaming(request_id, messages, kwargs, model)
 
     except HTTPException:
         raise
@@ -172,10 +173,10 @@ async def chat_completions_endpoint(request: Request):
         # Decidir si es streaming o no
         if stream:
             logger.info(f"🌊 [{request_id}] Modo streaming activado")
-            return await converter._chat_completions_streaming(request_id, messages, kwargs, model)
+            return await converter.chat_completions_streaming(request_id, messages, kwargs, model)
         else:
             logger.info(f"📄 [{request_id}] Modo sin streaming")
-            return await converter._chat_completions_non_streaming(request_id, messages, kwargs, model)
+            return await converter.chat_completions_non_streaming(request_id, messages, kwargs, model)
 
     except HTTPException:
         raise
@@ -350,12 +351,12 @@ async def responses_endpoint(request: Request):
         # Decidir entre streaming y no streaming
         if stream:
             logger.info(f"🌊 [{request_id}] Modo streaming activado")
-            return await converter._responses_streaming(
+            return await converter.responses_streaming(
                 request_id, output_item_id, messages, kwargs, model, has_reasoning
             )
         else:
             logger.info(f"📄 [{request_id}] Modo sin streaming")
-            return await converter._responses_non_streaming(
+            return await converter.responses_non_streaming(
                 request_id, output_item_id, messages, kwargs, model
             )
 
