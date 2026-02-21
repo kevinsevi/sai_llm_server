@@ -5,6 +5,7 @@ import json
 import uuid
 
 from sai_handler import sai_llm, logger, VERBOSE_LOGGING
+from sai_builder import event_builder
 from starlette.responses import Response, StreamingResponse
 from typing import AsyncIterator
 
@@ -813,28 +814,6 @@ class OpenAiSAIConverter:
 
     async def _responses_streaming(self, request_id: str, output_item_id: str,
                                    messages: list, kwargs: dict, model: str, has_reasoning=False):
-        """
-        Maneja requests a /v1/responses con streaming SSE.
-
-        Compatible con OpenAI Responses API y Codex CLI.
-        Emite eventos canónicos:
-        - response.created
-        - response.output_item.added
-        - response.output_text.delta
-        - response.output_item.done
-        - response.done
-
-        Args:
-            request_id: ID único de la solicitud
-            response_id: ID de la respuesta
-            output_item_id: ID del item de salida
-            messages: Lista de mensajes procesados
-            kwargs: Parámetros adicionales para LiteLLM
-            model: Nombre del modelo
-
-        Returns:
-            StreamingResponse: Stream de eventos SSE con formato Codex CLI
-        """
         # Generar stream de eventos SSE
         async def event_generator() -> AsyncIterator[str]:
             try:
@@ -844,106 +823,26 @@ class OpenAiSAIConverter:
 
                 response_id = f"resp_{uuid.uuid4().hex[:50]}"
 
-                created_event = {
-                    "type": "response.created",
-                    "response": {
-                        "id": response_id,
-                        "object": "response",
-                        "created_at": created_at,
-                        "status": "in_progress",
-                        "background": False,
-                        "completed_at": None,
-                        "error": None,
-                        "frequency_penalty": kwargs.get("frequency_penalty", 0.0),
-                        "incomplete_details": None,
-                        "instructions": kwargs.get("instructions"),
-                        "max_output_tokens": kwargs.get("max_tokens"),
-                        "max_tool_calls": None,
-                        "model": model,
-                        "output": [],
-                        "parallel_tool_calls": True,
-                        "presence_penalty": kwargs.get("presence_penalty", 0.0),
-                        "previous_response_id": None,
-                        "prompt_cache_key": None,
-                        "prompt_cache_retention": None,
-                        "reasoning": {
-                            "effort": "none",
-                            "summary": None
-                        },
-                        "safety_identifier": None,
-                        "service_tier": "auto",
-                        "store": True,
-                        "temperature": kwargs.get("temperature", 1.0),
-                        "text": {
-                            "format": {
-                                "type": "text"
-                            },
-                            "verbosity": "medium"
-                        },
-                        "tool_choice": kwargs.get("tool_choice", "auto"),
-                        "tools": kwargs.get("tools", []),
-                        "top_logprobs": 0,
-                        "top_p": kwargs.get("top_p", 1.0),
-                        "truncation": "disabled",
-                        "usage": None,
-                        "user": None,
-                        "metadata": {}
-                    },
-                    "sequence_number": 0
-                }
+                response_created = event_builder.build_response_created_event(
+                    response_id=response_id,
+                    created_at=created_at,
+                    kwargs=kwargs,
+                    model=model,
+                    sequence_number=0
+                )
                 yield "event: response.created\n"
-                yield f"data: {json.dumps(created_event)}\n\n"
+                yield f"data: {json.dumps(response_created)}\n\n"
 
                 # 🔥 EVENTO CANÓNICO: response.in_progress
-                in_progress_event = {
-                    "type": "response.in_progress",
-                    "response": {
-                        "id": response_id,
-                        "object": "response",
-                        "created_at": created_at,
-                        "status": "in_progress",
-                        "background": False,
-                        "completed_at": None,
-                        "error": None,
-                        "frequency_penalty": kwargs.get("frequency_penalty", 0.0),
-                        "incomplete_details": None,
-                        "instructions": kwargs.get("instructions"),
-                        "max_output_tokens": kwargs.get("max_tokens"),
-                        "max_tool_calls": None,
-                        "model": model,
-                        "output": [],
-                        "parallel_tool_calls": True,
-                        "presence_penalty": kwargs.get("presence_penalty", 0.0),
-                        "previous_response_id": None,
-                        "prompt_cache_key": None,
-                        "prompt_cache_retention": None,
-                        "reasoning": {
-                            "effort": "none",
-                            "summary": None
-                        },
-                        "safety_identifier": None,
-                        "service_tier": "auto",
-                        "store": True,
-                        "temperature": kwargs.get("temperature", 1.0),
-                        "text": {
-                            "format": {
-                                "type": "text"
-                            },
-                            "verbosity": "medium"
-                        },
-                        "tool_choice": kwargs.get("tool_choice", "auto"),
-                        "tools": kwargs.get("tools", []),
-                        "top_logprobs": 0,
-                        "top_p": kwargs.get("top_p", 1.0),
-                        "truncation": "disabled",
-                        "usage": None,
-                        "user": None,
-                        "metadata": {}
-                    },
-                    "sequence_number": 1
-                }
+                response_in_progress = event_builder.build_response_in_progress_event(
+                    response_id=response_id,
+                    created_at=created_at,
+                    kwargs=kwargs,
+                    model=model,
+                    sequence_number=1
+                )
                 yield "event: response.in_progress\n"
-                yield f"data: {json.dumps(in_progress_event)}\n\n"
+                yield f"data: {json.dumps(response_in_progress)}\n\n"
 
                 logger.info(f"🌊 [{request_id}] Iniciando streaming SSE...")
 
@@ -969,72 +868,45 @@ class OpenAiSAIConverter:
 
                 rs_item_id = f"rs_{uuid.uuid4().hex[:50]}" if has_reasoning else f"msg_{uuid.uuid4().hex[:50]}"
 
-                output_item_added = {
-                    "type": "response.output_item.added",
-                    "item": {
-                        "id": rs_item_id,
-                        "type": item_type,
-                        "role": "assistant",
-                        "content": [
-                            {
-                                "type": "output_text",
-                                "text": ""
-                            }
-                        ]
-                    }
-                }
+                response_output_item_added = event_builder.build_response_output_item_added_event(
+                    item_id=rs_item_id if has_reasoning else f"msg_{uuid.uuid4().hex[:50]}",
+                    item_type="reasoning" if has_reasoning else "message"
+                )
                 yield "event: response.output_item.added\n"
-                yield f"data: {json.dumps(output_item_added)}\n\n"
+                yield f"data: {json.dumps(response_output_item_added)}\n\n"
 
                 if has_reasoning:
-                    output_item_done = {
-                        "type": "response.output_item.done",
-                        "item": {
-                            "id": rs_item_id,
-                            "type": item_type,
-                            "role": "assistant",
-                            "content": [
-                                {
-                                    "type": "output_text",
-                                    "text": ""
-                                }
-                            ]
-                        }
-                    }
+                    response_output_item_done = event_builder.build_response_output_item_done_event(
+                        item_id=rs_item_id,
+                        item_type=item_type,
+                        text="",
+                    )
                     yield "event: response.output_item.done\n"
-                    yield f"data: {json.dumps(output_item_done)}\n\n"
+                    yield f"data: {json.dumps(response_output_item_done)}\n\n"
 
                 fc_item_id = uuid.uuid4().hex[:50]
                 call_item_id = uuid.uuid4().hex[:24]
 
                 if has_reasoning:
-                    output_item_added = {
-                        "type": "response.output_item.added",
-                        "item": {
-                            "id": f"fc_{fc_item_id}",
-                            "type": "function_call",
-                            "status": "in_progress",
-                            "arguments": "",
-                            "call_id": f"call_{call_item_id}",
-                            "name": "exec_command"
-                        }
-                    }
+                    response_output_item_added = event_builder.build_response_output_item_added_event(
+                        item_id=f"fc_{fc_item_id}",
+                        item_type="function_call",
+                        call_id=f"call_{call_item_id}",
+                        name="exec_command"
+                    )
                     yield "event: response.output_item.added\n"
-                    yield f"data: {json.dumps(output_item_added)}\n\n"
+                    yield f"data: {json.dumps(response_output_item_added)}\n\n"
                 else:
                     # 🔥 EVENTO CANÓNICO: response.content_part.added (después de output_item.added)
                     # Algunos clientes esperan este evento antes de comenzar a recibir deltas.
-                    content_part_added = {
-                        "type": "response.content_part.added",
-                        "item_id": output_item_id,
-                        "part": {
-                            "type": "output_text",
-                            "text": ""
-                        },
-                        "index": 0
-                    }
+                    response_content_part_added = event_builder.build_response_content_part_added_event(
+                        item_id=output_item_id,
+                        part_type="output_text",
+                        text="",
+                        index=0
+                    )
                     yield "event: response.content_part.added\n"
-                    yield f"data: {json.dumps(content_part_added)}\n\n"
+                    yield f"data: {json.dumps(response_content_part_added)}\n\n"
 
                 try:
                     async for chunk in sai_llm.astreaming(messages=messages, **kwargs):
@@ -1066,14 +938,13 @@ class OpenAiSAIConverter:
 
                                 if not has_reasoning:
                                     # Emitir evento function_call.started
-                                    function_call_started = {
-                                        "type": "response.function_call.started",
-                                        "item_id": output_item_id,
-                                        "call_id": tc.get("id", f"call_{request_id}"),
-                                        "name": function_name
-                                    }
+                                    response_function_call_started = event_builder.build_response_function_call_started_event(
+                                        item_id=output_item_id,
+                                        call_id=tc.get("id", f"call_{request_id}"),
+                                        name=function_name
+                                    )
                                     yield "event: response.function_call.started\n"
-                                    yield f"data: {json.dumps(function_call_started)}\n\n"
+                                    yield f"data: {json.dumps(response_function_call_started)}\n\n"
 
                                 # Emitir argumentos en chunks pequeños
                                 chunk_size = 20
@@ -1081,35 +952,32 @@ class OpenAiSAIConverter:
                                     arg_chunk = function_arguments[i:i + chunk_size]
                                     function_arguments_buffer += arg_chunk
 
-                                    function_call_delta = {
-                                        "type": "response.function_call.arguments.delta",
-                                        "item_id": output_item_id,
-                                        "call_id": tc.get("id", f"call_{request_id}"),
-                                        "delta": arg_chunk
-                                    }
+                                    response_function_call_arguments_delta = event_builder.build_response_function_call_arguments_delta_event(
+                                        item_id=output_item_id,
+                                        call_id=tc.get("id", f"call_{request_id}"),
+                                        delta=arg_chunk
+                                    )
                                     yield "event: response.function_call.arguments.delta\n"
-                                    yield f"data: {json.dumps(function_call_delta)}\n\n"
+                                    yield f"data: {json.dumps(response_function_call_arguments_delta)}\n\n"
 
                                 if has_reasoning:
-                                    function_call_arguments_done = {
-                                        "type": "response.function_call_arguments.done",
-                                        "arguments": function_arguments,
-                                        "item_id": f"fc_{fc_item_id}",
-                                        "output_index": 1
-                                    }
+                                    response_function_call_arguments_done = event_builder.build_response_function_call_arguments_done_event(
+                                        arguments=function_arguments,
+                                        item_id=f"fc_{fc_item_id}",
+                                        output_index=1
+                                    )
                                     yield "event: response.function_call_arguments.done\n"
-                                    yield f"data: {json.dumps(function_call_arguments_done)}\n\n"
+                                    yield f"data: {json.dumps(response_function_call_arguments_done)}\n\n"
                                 else:
                                     # Emitir evento function_call.completed
-                                    function_call_completed = {
-                                        "type": "response.function_call.completed",
-                                        "item_id": output_item_id,
-                                        "call_id": tc.get("id", f"call_{request_id}"),
-                                        "name": function_name,
-                                        "arguments": function_arguments
-                                    }
+                                    response_function_call_completed = event_builder.build_response_function_call_completed_event(
+                                        item_id=output_item_id,
+                                        call_id=tc.get("id", f"call_{request_id}"),
+                                        name=function_name,
+                                        arguments=function_arguments
+                                    )
                                     yield "event: response.function_call.completed\n"
-                                    yield f"data: {json.dumps(function_call_completed)}\n\n"
+                                    yield f"data: {json.dumps(response_function_call_completed)}\n\n"
 
                                 function_call_emitted = True
                                 finish_reason = "function_call"
@@ -1208,21 +1076,19 @@ class OpenAiSAIConverter:
 
                             # 🔥 FORMATO CODEX CLI: OutputTextDelta
                             if has_reasoning:
-                                function_call_arguments_delta_event = {
-                                    "type": "response.function_call_arguments.delta",
-                                    "delta": chunk_text,
-                                    "item_id": f"fc_{fc_item_id}"
-                                }
+                                response_function_call_arguments_delta = event_builder.build_response_function_call_arguments_delta_event(
+                                    item_id=f"fc_{fc_item_id}",
+                                    delta=chunk_text
+                                )
                                 yield f"event: response.function_call_arguments.delta\n"
-                                yield f"data: {json.dumps(function_call_arguments_delta_event)}\n\n"
+                                yield f"data: {json.dumps(response_function_call_arguments_delta)}\n\n"
                             else:
-                                text_delta_event = {
-                                    "type": "response.output_text.delta",
-                                    "item_id": output_item_id,
-                                    "delta": chunk_text
-                                }
+                                response_output_text_delta = event_builder.build_response_output_text_delta_event(
+                                    item_id=output_item_id,
+                                    delta=chunk_text
+                                )
                                 yield f"event: response.output_text.delta\n"
-                                yield f"data: {json.dumps(text_delta_event)}\n\n"
+                                yield f"data: {json.dumps(response_output_text_delta)}\n\n"
 
                         # Extraer usage del chunk
                         usage = chunk.get('usage') if isinstance(chunk, dict) else getattr(chunk, 'usage', None)
@@ -1274,55 +1140,47 @@ class OpenAiSAIConverter:
                 # 🔥 EVENTO CANÓNICO: response.output_text.done (solo si hay texto)
                 if total_text:
                     if has_reasoning:
-                        function_call_arguments_done = {
-                            "type": "response.function_call_arguments.done",
-                            "arguments": total_text,
-                            "item_id": f"fc_{fc_item_id}",
-                            "output_index": 1
-                        }
+                        response_function_call_arguments_done = event_builder.build_response_function_call_arguments_done_event(
+                            arguments=total_text,
+                            item_id=f"fc_{fc_item_id}",
+                            output_index=1,
+                            sequence_number=6
+                        )
                         yield "event: response.function_call_arguments.done\n"
-                        yield f"data: {json.dumps(function_call_arguments_done)}\n\n"
+                        yield f"data: {json.dumps(response_function_call_arguments_done)}\n\n"
                     else:
-                        output_text_done = {
-                            "type": "response.output_text.done",
-                            "item_id": output_item_id,
-                            "index": 0,
-                            "text": total_text
-                        }
+                        response_output_text_done = event_builder.build_response_output_text_done_event(
+                            item_id=output_item_id,
+                            text=total_text
+                        )
                         yield "event: response.output_text.done\n"
-                        yield f"data: {json.dumps(output_text_done)}\n\n"
+                        yield f"data: {json.dumps(response_output_text_done)}\n\n"
 
                         # 🔥 EVENTO CANÓNICO: response.content_part.done
-                        content_part_done = {
-                            "type": "response.content_part.done",
-                            "item_id": output_item_id,
-                            "index": 0,
-                            "part": {
-                                "type": "output_text",
-                                "text": total_text
-                            }
-                        }
+                        response_content_part_done = event_builder.build_response_content_part_done_event(
+                            item_id=output_item_id,
+                            text=total_text,
+                            index=0
+                        )
                         yield "event: response.content_part.done\n"
-                        yield f"data: {json.dumps(content_part_done)}\n\n"
+                        yield f"data: {json.dumps(response_content_part_done)}\n\n"
 
                 if has_reasoning:
                     # 🔥 EVENTO: output_item.done
-                    output_item_done = {
-                        "type": "response.output_item.done",
-                        "item": {
-                            "id": f"fc_{fc_item_id}",
-                            "type": "function_call",
-                            "status": "completed",
+                    response_output_item_done = event_builder.build_response_output_item_done_event(
+                        item_id=f"fc_{fc_item_id}",
+                        item_type="function_call",
+                        output_index=0,
+                        sequence_number=7,
+                        function_call_data={
                             "arguments": "{\"cmd\":\"ls\",\"yield_time_ms\":1000,\"max_output_tokens\":6000}",
                             "call_id": f"call_{call_item_id}",
-                            "name": "exec_command"
-                        },
-                        "output_index": 0,
-                        "sequence_number": 7
-                    }
-
+                            "name": "exec_command",
+                            "status": "completed"
+                        }
+                    )
                     yield "event: response.output_item.done\n"
-                    yield f"data: {json.dumps(output_item_done)}\n\n"
+                    yield f"data: {json.dumps(response_output_item_done)}\n\n"
 
                     # 🔥 EVENTO CANÓNICO (compat): response.completed
                     # Algunos clientes esperan este evento antes del evento final response.done.
@@ -1340,96 +1198,42 @@ class OpenAiSAIConverter:
 
                     # Formato para function_call
 
-                    completed_event = {
-                        "type": "response.completed",
-                        "response": {
-                            "id": response_id,
-                            "object": "response",
-                            "created_at": created_at,
-                            "status": "completed",
-                            "background": False,
-                            "completed_at": completed_at,
-                            "error": None,
-                            "frequency_penalty": kwargs.get("frequency_penalty", 0.0),
-                            "incomplete_details": None,
-                            "instructions": kwargs.get("instructions"),
-                            "max_output_tokens": kwargs.get("max_tokens"),
-                            "max_tool_calls": None,
-                            "metadata": {},
-                            "model": model,
-                            "output": output,
-                            "parallel_tool_calls": True,
-                            "presence_penalty": kwargs.get("presence_penalty", 0.0),
-                            "previous_response_id": None,
-                            "prompt_cache_key": None,
-                            "prompt_cache_retention": None,
-                            "reasoning": {
-                                "effort": "none",
-                                "summary": None
-                            },
-                            "safety_identifier": None,
-                            "service_tier": "default",
-                            "store": True,
-                            "temperature": kwargs.get("temperature", 1.0),
-                            "text": {
-                                "format": {
-                                    "type": "text"
-                                },
-                                "verbosity": "medium"
-                            },
-                            "tool_choice": kwargs.get("tool_choice", "auto"),
-                            "tools": kwargs.get("tools", []),
-                            "top_logprobs": 0,
-                            "top_p": kwargs.get("top_p", 0.98),
-                            "truncation": "disabled",
-                            "usage": {
-                                "input_tokens": input_tokens,
-                                "input_tokens_details": {
-                                    "cached_tokens": 0
-                                },
-                                "output_tokens": output_tokens,
-                                "output_tokens_details": {
-                                    "reasoning_tokens": 0
-                                },
-                                "total_tokens": input_tokens + output_tokens
-                            },
-                            "user": None
-                        },
-                        "sequence_number": 8
-                    }
+                    response_completed = event_builder.build_response_completed_event(
+                        response_id=response_id,
+                        created_at=created_at,
+                        completed_at=completed_at,
+                        kwargs=kwargs,
+                        model=model,
+                        output=output,
+                        input_tokens=input_tokens,
+                        output_tokens=output_tokens,
+                        sequence_number=8
+                    )
                     yield "event: response.completed\n"
-                    yield f"data: {json.dumps(completed_event)}\n\n"
+                    yield f"data: {json.dumps(response_completed)}\n\n"
                 else:
                     # 🔥 EVENTO: output_item.done
-                    output_item_done = {
-                        "type": "response.output_item.done",
-                        "item": {
-                            "id": output_item_id,
-                            "type": "message",
-                            "status": "completed",
-                            "content": [
-                                {
-                                    "type": "output_text",
-                                    "annotations": [],
-                                    "logprobs": [],
-                                    "text": total_text
-                                }
-                            ],
-                            "role": "assistant"
-                        },
-                        "output_index": 0,
-                        "sequence_number": 7
-                    }
-
-                    # Si hubo function_call, agregar al output_item
+                    # Construir function_call_data si hubo function_call
+                    function_call_data = None
                     if function_call_emitted and function_name:
-                        output_item_done["item"]["function_call"] = {
+                        function_call_data = {
+                            "call_id": f"call_{request_id}",
                             "name": function_name,
-                            "arguments": function_arguments_buffer
+                            "arguments": function_arguments_buffer,
+                            "status": "completed"
                         }
 
+                    response_output_item_done = event_builder.build_response_output_item_done_event(
+                        item_id=output_item_id,
+                        item_type="message",
+                        text=total_text,
+                        output_index=0,
+                        sequence_number=7,
+                        function_call_data=function_call_data
+                    )
+
                     yield "event: response.output_item.done\n"
-                    yield f"data: {json.dumps(output_item_done)}\n\n"
+                    yield f"data: {json.dumps(response_output_item_done)}\n\n"
 
                     # 🔥 EVENTO CANÓNICO (compat): response.completed
                     # Algunos clientes esperan este evento antes del evento final response.done.
@@ -1465,65 +1269,19 @@ class OpenAiSAIConverter:
                             "role": "assistant"
                         })
 
-                    completed_event = {
-                        "type": "response.completed",
-                        "response": {
-                            "id": response_id,
-                            "object": "response",
-                            "created_at": created_at,
-                            "completed_at": completed_at,
-                            "status": "completed",
-                            "background": False,
-                            "error": None,
-                            "frequency_penalty": kwargs.get("frequency_penalty", 0.0),
-                            "incomplete_details": None,
-                            "instructions": kwargs.get("instructions"),
-                            "max_output_tokens": kwargs.get("max_tokens"),
-                            "max_tool_calls": None,
-                            "metadata": {},
-                            "model": model,
-                            "output": output,
-                            "parallel_tool_calls": True,
-                            "presence_penalty": kwargs.get("presence_penalty", 0.0),
-                            "previous_response_id": None,
-                            "prompt_cache_key": None,
-                            "prompt_cache_retention": None,
-                            "reasoning": {
-                                "effort": "none",
-                                "summary": None
-                            },
-                            "safety_identifier": None,
-                            "service_tier": "default",
-                            "store": True,
-                            "temperature": kwargs.get("temperature", 1.0),
-                            "text": {
-                                "format": {
-                                    "type": "text"
-                                },
-                                "verbosity": "medium"
-                            },
-                            "tool_choice": kwargs.get("tool_choice", "auto"),
-                            "tools": kwargs.get("tools", []),
-                            "top_logprobs": 0,
-                            "top_p": kwargs.get("top_p", 0.98),
-                            "truncation": "disabled",
-                            "usage": {
-                                "input_tokens": input_tokens,
-                                "input_tokens_details": {
-                                    "cached_tokens": 0
-                                },
-                                "output_tokens": output_tokens,
-                                "output_tokens_details": {
-                                    "reasoning_tokens": 0
-                                },
-                                "total_tokens": input_tokens + output_tokens
-                            },
-                            "user": None
-                        },
-                        "sequence_number": 8
-                    }
+                    response_completed = event_builder.build_response_completed_event(
+                        response_id=response_id,
+                        created_at=created_at,
+                        completed_at=completed_at,
+                        kwargs=kwargs,
+                        model=model,
+                        output=output,
+                        input_tokens=input_tokens,
+                        output_tokens=output_tokens,
+                        sequence_number=8
+                    )
                     yield "event: response.completed\n"
-                    yield f"data: {json.dumps(completed_event)}\n\n"
+                    yield f"data: {json.dumps(response_completed)}\n\n"
 
                 # 🔥 EVENTO FINAL OBLIGATORIO: response.done
                 # done_event = {
