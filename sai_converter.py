@@ -6,7 +6,7 @@ from sai_extractor import text_extractor
 # ---------------- Conversor de formatos OpenAI ----------------
 class OpenAiSAIConverter:
     @staticmethod
-    def openai_to_litellm(openai_request: dict) -> tuple[list, dict]:
+    def openai_request_to_litellm_request(openai_request: dict) -> tuple[list, dict]:
         messages = []
 
         # Extraer system prompt si existe
@@ -75,7 +75,7 @@ class OpenAiSAIConverter:
         return messages, kwargs
 
     @staticmethod
-    def litellm_to_openai_response(litellm_response, model: str, request_id: str) -> dict:
+    def litellm_response_to_openai_response(litellm_response, model: str, request_id: str) -> dict:
         # Extraer texto de la respuesta
         text = ""
         if hasattr(litellm_response, 'text') and litellm_response.text:

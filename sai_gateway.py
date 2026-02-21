@@ -161,7 +161,7 @@ async def chat_completions_endpoint(request: Request):
         if tools:
             openai_body["tools"] = tools
 
-        messages, kwargs = converter.openai_to_litellm(openai_body)
+        messages, kwargs = converter.openai_request_to_litellm_request(openai_body)
 
         # Extraer user_api_key si viene en headers
         user_api_key = request.headers.get("authorization", "").replace("Bearer ", "").strip()
@@ -229,7 +229,7 @@ async def messages_endpoint(request: Request):
         logger.info(f"📊 [{request_id}] Model: {body.get('model', 'N/A')} | Messages: {len(body.get('messages', []))}")
 
         # Convertir request de OpenAI a LiteLLM
-        messages, kwargs = converter.openai_to_litellm(body)
+        messages, kwargs = converter.openai_request_to_litellm_request(body)
 
         logger.info(
             f"🔄 [{request_id}] Convertido a formato LiteLLM | "
@@ -253,7 +253,7 @@ async def messages_endpoint(request: Request):
 
         # Convertir respuesta a formato OpenAI
         model = body.get("model")
-        openai_response = converter.litellm_to_openai_response(
+        openai_response = converter.litellm_response_to_openai_response(
             litellm_response, model, request_id
         )
 
@@ -330,7 +330,7 @@ async def responses_endpoint(request: Request):
         logger.info(f"📊 [{request_id}] Model: {body.get('model', 'N/A')} | Messages: {len(body.get('messages', []))}")
 
         # Convertir request
-        messages, kwargs = converter.openai_to_litellm(body)
+        messages, kwargs = converter.openai_request_to_litellm_request(body)
 
         logger.info(
             f"🔄 [{request_id}] Convertido a formato LiteLLM | "
