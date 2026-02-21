@@ -9,6 +9,7 @@ import uvicorn
 from sai_handler import sai_llm, logger
 from sai_converter import converter
 from sai_completions import completions_handler
+from sai_chat_completions import chat_completions_handler
 from sai_models import get_models_list, get_model_by_id
 
 app = FastAPI(title="OpenAI SAI Gateway", version="1.0.4")
@@ -173,10 +174,10 @@ async def chat_completions_endpoint(request: Request):
         # Decidir si es streaming o no
         if stream:
             logger.info(f"🌊 [{request_id}] Modo streaming activado")
-            return await converter.chat_completions_streaming(request_id, messages, kwargs, model)
+            return await chat_completions_handler.chat_completions_streaming(request_id, messages, kwargs, model)
         else:
             logger.info(f"📄 [{request_id}] Modo sin streaming")
-            return await converter.chat_completions_non_streaming(request_id, messages, kwargs, model)
+            return await chat_completions_handler.chat_completions_non_streaming(request_id, messages, kwargs, model)
 
     except HTTPException:
         raise
