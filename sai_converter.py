@@ -817,6 +817,9 @@ class OpenAiSAIConverter:
         # Generar stream de eventos SSE
         async def event_generator() -> AsyncIterator[str]:
             try:
+                # 🔢 Inicializar contador de secuencia
+                sequence_number = 0
+
                 # 🔥 EVENTO CANÓNICO: response.created
                 # Timestamp de creación
                 created_at = int(time.time())
@@ -828,8 +831,9 @@ class OpenAiSAIConverter:
                     created_at=created_at,
                     kwargs=kwargs,
                     model=model,
-                    sequence_number=0
+                    sequence_number=sequence_number
                 )
+                sequence_number += 1
                 yield "event: response.created\n"
                 yield f"data: {json.dumps(response_created)}\n\n"
 
@@ -839,8 +843,9 @@ class OpenAiSAIConverter:
                     created_at=created_at,
                     kwargs=kwargs,
                     model=model,
-                    sequence_number=1
+                    sequence_number=sequence_number
                 )
+                sequence_number += 1
                 yield "event: response.in_progress\n"
                 yield f"data: {json.dumps(response_in_progress)}\n\n"
 
@@ -870,8 +875,10 @@ class OpenAiSAIConverter:
 
                 response_output_item_added = event_builder.build_response_output_item_added_event(
                     item_id=rs_item_id if has_reasoning else f"msg_{uuid.uuid4().hex[:50]}",
-                    item_type="reasoning" if has_reasoning else "message"
+                    item_type="reasoning" if has_reasoning else "message",
+                    sequence_number=sequence_number
                 )
+                sequence_number += 1
                 yield "event: response.output_item.added\n"
                 yield f"data: {json.dumps(response_output_item_added)}\n\n"
 
@@ -880,7 +887,9 @@ class OpenAiSAIConverter:
                         item_id=rs_item_id,
                         item_type=item_type,
                         text="",
+                        sequence_number=sequence_number
                     )
+                    sequence_number += 1
                     yield "event: response.output_item.done\n"
                     yield f"data: {json.dumps(response_output_item_done)}\n\n"
 
@@ -892,8 +901,10 @@ class OpenAiSAIConverter:
                         item_id=f"fc_{fc_item_id}",
                         item_type="function_call",
                         call_id=f"call_{call_item_id}",
-                        name="exec_command"
+                        name="exec_command",
+                        sequence_number=sequence_number
                     )
+                    sequence_number += 1
                     yield "event: response.output_item.added\n"
                     yield f"data: {json.dumps(response_output_item_added)}\n\n"
                 else:
@@ -903,8 +914,10 @@ class OpenAiSAIConverter:
                         item_id=output_item_id,
                         part_type="output_text",
                         text="",
-                        index=0
+                        index=0,
+                        sequence_number=sequence_number
                     )
+                    sequence_number += 1
                     yield "event: response.content_part.added\n"
                     yield f"data: {json.dumps(response_content_part_added)}\n\n"
 
@@ -941,8 +954,10 @@ class OpenAiSAIConverter:
                                     response_function_call_started = event_builder.build_response_function_call_started_event(
                                         item_id=output_item_id,
                                         call_id=tc.get("id", f"call_{request_id}"),
-                                        name=function_name
+                                        name=function_name,
+                                        sequence_number=sequence_number
                                     )
+                                    sequence_number += 1
                                     yield "event: response.function_call.started\n"
                                     yield f"data: {json.dumps(response_function_call_started)}\n\n"
 
@@ -955,8 +970,10 @@ class OpenAiSAIConverter:
                                     response_function_call_arguments_delta = event_builder.build_response_function_call_arguments_delta_event(
                                         item_id=output_item_id,
                                         call_id=tc.get("id", f"call_{request_id}"),
-                                        delta=arg_chunk
+                                        delta=arg_chunk,
+                                        sequence_number=sequence_number
                                     )
+                                    sequence_number += 1
                                     yield "event: response.function_call.arguments.delta\n"
                                     yield f"data: {json.dumps(response_function_call_arguments_delta)}\n\n"
 
@@ -964,8 +981,10 @@ class OpenAiSAIConverter:
                                     response_function_call_arguments_done = event_builder.build_response_function_call_arguments_done_event(
                                         arguments=function_arguments,
                                         item_id=f"fc_{fc_item_id}",
-                                        output_index=1
+                                        output_index=1,
+                                        sequence_number=sequence_number
                                     )
+                                    sequence_number += 1
                                     yield "event: response.function_call_arguments.done\n"
                                     yield f"data: {json.dumps(response_function_call_arguments_done)}\n\n"
                                 else:
@@ -974,8 +993,10 @@ class OpenAiSAIConverter:
                                         item_id=output_item_id,
                                         call_id=tc.get("id", f"call_{request_id}"),
                                         name=function_name,
-                                        arguments=function_arguments
+                                        arguments=function_arguments,
+                                        sequence_number=sequence_number
                                     )
+                                    sequence_number += 1
                                     yield "event: response.function_call.completed\n"
                                     yield f"data: {json.dumps(response_function_call_completed)}\n\n"
 
@@ -1078,15 +1099,19 @@ class OpenAiSAIConverter:
                             if has_reasoning:
                                 response_function_call_arguments_delta = event_builder.build_response_function_call_arguments_delta_event(
                                     item_id=f"fc_{fc_item_id}",
-                                    delta=chunk_text
+                                    delta=chunk_text,
+                                    sequence_number=sequence_number
                                 )
+                                sequence_number += 1
                                 yield f"event: response.function_call_arguments.delta\n"
                                 yield f"data: {json.dumps(response_function_call_arguments_delta)}\n\n"
                             else:
                                 response_output_text_delta = event_builder.build_response_output_text_delta_event(
                                     item_id=output_item_id,
-                                    delta=chunk_text
+                                    delta=chunk_text,
+                                    sequence_number=sequence_number
                                 )
+                                sequence_number += 1
                                 yield f"event: response.output_text.delta\n"
                                 yield f"data: {json.dumps(response_output_text_delta)}\n\n"
 
@@ -1144,15 +1169,18 @@ class OpenAiSAIConverter:
                             arguments=total_text,
                             item_id=f"fc_{fc_item_id}",
                             output_index=1,
-                            sequence_number=6
+                            sequence_number=sequence_number
                         )
+                        sequence_number += 1
                         yield "event: response.function_call_arguments.done\n"
                         yield f"data: {json.dumps(response_function_call_arguments_done)}\n\n"
                     else:
                         response_output_text_done = event_builder.build_response_output_text_done_event(
                             item_id=output_item_id,
-                            text=total_text
+                            text=total_text,
+                            sequence_number=sequence_number
                         )
+                        sequence_number += 1
                         yield "event: response.output_text.done\n"
                         yield f"data: {json.dumps(response_output_text_done)}\n\n"
 
@@ -1160,8 +1188,10 @@ class OpenAiSAIConverter:
                         response_content_part_done = event_builder.build_response_content_part_done_event(
                             item_id=output_item_id,
                             text=total_text,
-                            index=0
+                            index=0,
+                            sequence_number=sequence_number
                         )
+                        sequence_number += 1
                         yield "event: response.content_part.done\n"
                         yield f"data: {json.dumps(response_content_part_done)}\n\n"
 
@@ -1171,7 +1201,7 @@ class OpenAiSAIConverter:
                         item_id=f"fc_{fc_item_id}",
                         item_type="function_call",
                         output_index=0,
-                        sequence_number=7,
+                        sequence_number=sequence_number,
                         function_call_data={
                             "arguments": "{\"cmd\":\"ls\",\"yield_time_ms\":1000,\"max_output_tokens\":6000}",
                             "call_id": f"call_{call_item_id}",
@@ -1179,6 +1209,7 @@ class OpenAiSAIConverter:
                             "status": "completed"
                         }
                     )
+                    sequence_number += 1
                     yield "event: response.output_item.done\n"
                     yield f"data: {json.dumps(response_output_item_done)}\n\n"
 
@@ -1207,8 +1238,9 @@ class OpenAiSAIConverter:
                         output=output,
                         input_tokens=input_tokens,
                         output_tokens=output_tokens,
-                        sequence_number=8
+                        sequence_number=sequence_number
                     )
+                    sequence_number += 1
                     yield "event: response.completed\n"
                     yield f"data: {json.dumps(response_completed)}\n\n"
                 else:
@@ -1228,10 +1260,10 @@ class OpenAiSAIConverter:
                         item_type="message",
                         text=total_text,
                         output_index=0,
-                        sequence_number=7,
+                        sequence_number=sequence_number,
                         function_call_data=function_call_data
                     )
-
+                    sequence_number += 1
                     yield "event: response.output_item.done\n"
                     yield f"data: {json.dumps(response_output_item_done)}\n\n"
 
@@ -1278,8 +1310,9 @@ class OpenAiSAIConverter:
                         output=output,
                         input_tokens=input_tokens,
                         output_tokens=output_tokens,
-                        sequence_number=8
+                        sequence_number=sequence_number
                     )
+                    sequence_number += 1
                     yield "event: response.completed\n"
                     yield f"data: {json.dumps(response_completed)}\n\n"
 
