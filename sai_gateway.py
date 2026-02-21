@@ -10,6 +10,7 @@ from sai_handler import sai_llm, logger
 from sai_converter import converter
 from sai_completions import completions_handler
 from sai_chat_completions import chat_completions_handler
+from sai_responses import responses_handler
 from sai_models import get_models_list, get_model_by_id
 
 app = FastAPI(title="OpenAI SAI Gateway", version="1.0.4")
@@ -352,12 +353,12 @@ async def responses_endpoint(request: Request):
         # Decidir entre streaming y no streaming
         if stream:
             logger.info(f"🌊 [{request_id}] Modo streaming activado")
-            return await converter.responses_streaming(
+            return await responses_handler.responses_streaming(
                 request_id, output_item_id, messages, kwargs, model, has_reasoning
             )
         else:
             logger.info(f"📄 [{request_id}] Modo sin streaming")
-            return await converter.responses_non_streaming(
+            return await responses_handler.responses_non_streaming(
                 request_id, output_item_id, messages, kwargs, model
             )
 
