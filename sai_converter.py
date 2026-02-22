@@ -42,6 +42,36 @@ class OpenAiSAIConverter:
                     "content": text_content
                 })
 
+        # Procesar input si existe
+        input_messages = openai_request.get("input", [])
+        for input_msg in input_messages:
+            if input_msg.get("type") == "message":
+                role = input_msg.get("role")
+                content_items = input_msg.get("content", [])
+
+                # Extraer texto de los items de contenido
+                text_parts = []
+                for content_item in content_items:
+                    text = content_item.get("text", "")
+                    if text:
+                        text_parts.append(text)
+
+                # Unir todos los textos y agregar el mensaje
+                if text_parts:
+                    text_content = "\n".join(text_parts)
+                    messages.append({
+                        "role": role,
+                        "content": text_content
+                    })
+            elif input_msg.get("type") == "function_call_output":
+                role = "agent"
+                output = input_msg.get("output")
+
+                messages.append({
+                    "role": role,
+                    "content": "RESULTADO DE EJECUCIÓN: " + output
+                })
+
         # Preparar kwargs para LiteLLM
         kwargs = {
             "model": openai_request.get("model", "claude-sonnet-4-5-20250929"),
@@ -53,7 +83,8 @@ class OpenAiSAIConverter:
         }
 
         # Agregar tools si existen y no es lista vacía
-        tools = openai_request.get("tools")
+        tools = openai_request.get("tools") if messages[-1].get("role") != "agent" else None
+
         if tools is not None:
             # Omitir si es lista vacía
             if isinstance(tools, list) and len(tools) == 0:
