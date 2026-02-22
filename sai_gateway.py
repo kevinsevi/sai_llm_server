@@ -309,25 +309,7 @@ async def responses_endpoint(request: Request):
         else:
             logger.info(f"🧠 [{request_id}] Reasoning deshabilitado")
 
-        # Normalizar formato
-        if "input" in body and "messages" not in body:
-            logger.info(f"🔄 [{request_id}] Formato OpenAI SDK detectado (input) - Convirtiendo")
-            body["messages"] = [
-                {
-                    "role": "user",
-                    "content": body["input"]
-                }
-            ]
-
-        # Validar messages
-        if not body.get("messages"):
-            logger.error(f"❌ [{request_id}] Request sin 'messages' ni 'input'")
-            raise HTTPException(
-                status_code=400,
-                detail="Se requiere 'messages' (OpenAI format) o 'input' (OpenAI format)"
-            )
-
-        logger.info(f"📊 [{request_id}] Model: {body.get('model', 'N/A')} | Messages: {len(body.get('messages', []))}")
+        logger.info(f"📊 [{request_id}] Model: {body.get('model', 'N/A')} | Messages: {len(body.get('messages', []))} | Inputs: {len(body.get('input', []))}")
 
         # Convertir request
         messages, kwargs = converter.openai_request_to_litellm_request(body)
