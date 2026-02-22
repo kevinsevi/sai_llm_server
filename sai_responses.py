@@ -582,7 +582,7 @@ class ResponsesHandler:
                         output_index=0,
                         sequence_number=sequence_number,
                         function_call_data={
-                            "arguments": "{\"cmd\":\"ls\",\"yield_time_ms\":1000,\"max_output_tokens\":6000}",
+                            "arguments": function_arguments_buffer,
                             "call_id": f"call_{call_item_id}",
                             "name": "exec_command",
                             "status": "completed"
