@@ -199,120 +199,116 @@ class ResponsesHandler:
                 # 🔢 Inicializar contador de secuencia
                 sequence_number = 0
 
-                # 🔥 EVENTO CANÓNICO: response.created
-                # Timestamp de creación
-                created_at = int(time.time())
-
-                response_id = f"resp_{uuid.uuid4().hex[:50]}"
-
-                response_created = event_builder.build_response_created_event(
-                    response_id=response_id,
-                    created_at=created_at,
-                    kwargs=kwargs,
-                    model=model,
-                    sequence_number=sequence_number
-                )
-                sequence_number += 1
-                yield "event: response.created\n"
-                yield f"data: {json.dumps(response_created)}\n\n"
-
-                # 🔥 EVENTO CANÓNICO: response.in_progress
-                response_in_progress = event_builder.build_response_in_progress_event(
-                    response_id=response_id,
-                    created_at=created_at,
-                    kwargs=kwargs,
-                    model=model,
-                    sequence_number=sequence_number
-                )
-                sequence_number += 1
-                yield "event: response.in_progress\n"
-                yield f"data: {json.dumps(response_in_progress)}\n\n"
-
-                logger.info(f"🌊 [{request_id}] Iniciando streaming SSE...")
-
-                # Variables para tracking
-                chunk_count = 0
-                total_text = ""
-                input_tokens = 0
-                output_tokens = 0
-                finish_reason = "end_turn"
-                first_chunk_received = False
-
-                # Variables para function_call streaming
-                function_call_emitted = False
-                function_name = None
-                function_arguments_buffer = ""
-
-                # Llamar a SAI streaming
-                logger.info(f"🚀 [{request_id}] Llamando a sai_llm.astreaming()...")
-
-                # 🔥 EVENTO CANÓNICO: response.output_item.added
-                # Determinar el tipo de item según has_reasoning
-                item_type = "reasoning" if has_reasoning else "message"
-
-                rs_item_id = f"rs_{uuid.uuid4().hex[:50]}" if has_reasoning else f"msg_{uuid.uuid4().hex[:50]}"
-
-                response_output_item_added = event_builder.build_response_output_item_added_event(
-                    item_id=rs_item_id if has_reasoning else f"msg_{uuid.uuid4().hex[:50]}",
-                    item_type="reasoning" if has_reasoning else "message",
-                    sequence_number=sequence_number
-                )
-                sequence_number += 1
-                yield "event: response.output_item.added\n"
-                yield f"data: {json.dumps(response_output_item_added)}\n\n"
-
-                if has_reasoning:
-                    response_output_item_done = event_builder.build_response_output_item_done_event(
-                        item_id=rs_item_id,
-                        item_type=item_type,
-                        text="",
-                        sequence_number=sequence_number
-                    )
-                    sequence_number += 1
-                    yield "event: response.output_item.done\n"
-                    yield f"data: {json.dumps(response_output_item_done)}\n\n"
-
-                fc_item_id = uuid.uuid4().hex[:50]
-                call_item_id = uuid.uuid4().hex[:24]
-
-                if has_reasoning:
-                    response_output_item_added = event_builder.build_response_output_item_added_event(
-                        item_id=f"fc_{fc_item_id}",
-                        item_type="function_call",
-                        call_id=f"call_{call_item_id}",
-                        name="exec_command",
-                        sequence_number=sequence_number
-                    )
-                    sequence_number += 1
-                    yield "event: response.output_item.added\n"
-                    yield f"data: {json.dumps(response_output_item_added)}\n\n"
-                else:
-                    # 🔥 EVENTO CANÓNICO: response.content_part.added (después de output_item.added)
-                    # Algunos clientes esperan este evento antes de comenzar a recibir deltas.
-                    response_content_part_added = event_builder.build_response_content_part_added_event(
-                        item_id=output_item_id,
-                        part_type="output_text",
-                        text="",
-                        index=0,
-                        sequence_number=sequence_number
-                    )
-                    sequence_number += 1
-                    yield "event: response.content_part.added\n"
-                    yield f"data: {json.dumps(response_content_part_added)}\n\n"
-
                 try:
-                    async for chunk in sai_llm.astreaming(messages=messages, **kwargs):
+                    # Almacenar el generador en una variable antes de iterar
+                    stream_generator = sai_llm.astreaming(messages=messages, **kwargs)
+
+                    # Variables para tracking
+                    chunk_count = 0
+                    tool_use = None
+                    # Timestamp de creación
+                    created_at = int(time.time())
+                    fc_item_id = uuid.uuid4().hex[:50]
+                    call_item_id = uuid.uuid4().hex[:24]
+                    response_id = f"resp_{uuid.uuid4().hex[:50]}"
+                    # Variables para function_call streaming
+                    function_call_emitted = False
+                    function_name = None
+                    total_text = ""
+                    input_tokens = 0
+                    output_tokens = 0
+                    finish_reason = "end_turn"
+
+                    function_arguments_buffer = ""
+
+                    async for chunk in stream_generator:
                         chunk_count += 1
+
+                        # Extraer tool_use del chunk
+                        tool_use = chunk.get('tool_use') if isinstance(chunk, dict) else getattr(chunk, 'tool_use', None)
 
                         if chunk_count == 1:
                             logger.warning(f"⏱️ [{request_id}] PRIMER CHUNK recibido")
 
-                        if not first_chunk_received:
-                            logger.info(f"📦 [{request_id}] Primer chunk recibido de SAI")
-                            first_chunk_received = True
+                            logger.info(f"🌊 [{request_id}] Iniciando streaming SSE...")
 
-                        # Extraer tool_use del chunk
-                        tool_use = chunk.get('tool_use') if isinstance(chunk, dict) else getattr(chunk, 'tool_use', None)
+                            # 🔥 EVENTO CANÓNICO: response.created
+                            response_created = event_builder.build_response_created_event(
+                                response_id=response_id,
+                                created_at=created_at,
+                                kwargs=kwargs,
+                                model=model,
+                                sequence_number=sequence_number
+                            )
+                            sequence_number += 1
+                            yield "event: response.created\n"
+                            yield f"data: {json.dumps(response_created)}\n\n"
+
+                            # 🔥 EVENTO CANÓNICO: response.in_progress
+                            response_in_progress = event_builder.build_response_in_progress_event(
+                                response_id=response_id,
+                                created_at=created_at,
+                                kwargs=kwargs,
+                                model=model,
+                                sequence_number=sequence_number
+                            )
+                            sequence_number += 1
+                            yield "event: response.in_progress\n"
+                            yield f"data: {json.dumps(response_in_progress)}\n\n"
+
+                            # Llamar a SAI streaming
+                            logger.info(f"🚀 [{request_id}] Llamando a sai_llm.astreaming()...")
+
+                            # 🔥 EVENTO CANÓNICO: response.output_item.added
+                            # Determinar el tipo de item según has_reasoning
+                            item_type = "reasoning" if tool_use else "message"
+
+                            rs_item_id = f"rs_{uuid.uuid4().hex[:50]}" if tool_use else f"msg_{uuid.uuid4().hex[:50]}"
+
+                            response_output_item_added = event_builder.build_response_output_item_added_event(
+                                item_id=rs_item_id if tool_use else f"msg_{uuid.uuid4().hex[:50]}",
+                                item_type="reasoning" if tool_use else "message",
+                                sequence_number=sequence_number
+                            )
+                            sequence_number += 1
+                            yield "event: response.output_item.added\n"
+                            yield f"data: {json.dumps(response_output_item_added)}\n\n"
+
+                            if tool_use:
+                                response_output_item_done = event_builder.build_response_output_item_done_event(
+                                    item_id=rs_item_id,
+                                    item_type=item_type,
+                                    text="",
+                                    sequence_number=sequence_number
+                                )
+                                sequence_number += 1
+                                yield "event: response.output_item.done\n"
+                                yield f"data: {json.dumps(response_output_item_done)}\n\n"
+
+                            if tool_use:
+                                response_output_item_added = event_builder.build_response_output_item_added_event(
+                                    item_id=f"fc_{fc_item_id}",
+                                    item_type="function_call",
+                                    call_id=f"call_{call_item_id}",
+                                    name="exec_command",
+                                    sequence_number=sequence_number
+                                )
+                                sequence_number += 1
+                                yield "event: response.output_item.added\n"
+                                yield f"data: {json.dumps(response_output_item_added)}\n\n"
+                            else:
+                                # 🔥 EVENTO CANÓNICO: response.content_part.added (después de output_item.added)
+                                # Algunos clientes esperan este evento antes de comenzar a recibir deltas.
+                                response_content_part_added = event_builder.build_response_content_part_added_event(
+                                    item_id=output_item_id,
+                                    part_type="output_text",
+                                    text="",
+                                    index=0,
+                                    sequence_number=sequence_number
+                                )
+                                sequence_number += 1
+                                yield "event: response.content_part.added\n"
+                                yield f"data: {json.dumps(response_content_part_added)}\n\n"
 
                         # 🔧 NUEVO: Soporte para function_call streaming
                         if tool_use and not function_call_emitted:
@@ -328,7 +324,7 @@ class ResponsesHandler:
                                     f"Arguments length: {len(function_arguments)}"
                                 )
 
-                                if not has_reasoning:
+                                if not tool_use:
                                     # Emitir evento function_call.started
                                     response_function_call_started = event_builder.build_response_function_call_started_event(
                                         item_id=output_item_id,
@@ -356,7 +352,7 @@ class ResponsesHandler:
                                     yield "event: response.function_call.arguments.delta\n"
                                     yield f"data: {json.dumps(response_function_call_arguments_delta)}\n\n"
 
-                                if has_reasoning:
+                                if tool_use:
                                     response_function_call_arguments_done = event_builder.build_response_function_call_arguments_done_event(
                                         arguments=function_arguments,
                                         item_id=f"fc_{fc_item_id}",
@@ -475,7 +471,7 @@ class ResponsesHandler:
                             total_text += chunk_text
 
                             # 🔥 FORMATO CODEX CLI: OutputTextDelta
-                            if has_reasoning:
+                            if tool_use:
                                 response_function_call_arguments_delta = event_builder.build_response_function_call_arguments_delta_event(
                                     item_id=f"fc_{fc_item_id}",
                                     delta=chunk_text,
@@ -543,7 +539,7 @@ class ResponsesHandler:
 
                 # 🔥 EVENTO CANÓNICO: response.output_text.done (solo si hay texto)
                 if total_text:
-                    if has_reasoning:
+                    if tool_use:
                         response_function_call_arguments_done = event_builder.build_response_function_call_arguments_done_event(
                             arguments=total_text,
                             item_id=f"fc_{fc_item_id}",
@@ -574,7 +570,7 @@ class ResponsesHandler:
                         yield "event: response.content_part.done\n"
                         yield f"data: {json.dumps(response_content_part_done)}\n\n"
 
-                if has_reasoning:
+                if tool_use:
                     # 🔥 EVENTO: output_item.done
                     response_output_item_done = event_builder.build_response_output_item_done_event(
                         item_id=f"fc_{fc_item_id}",
