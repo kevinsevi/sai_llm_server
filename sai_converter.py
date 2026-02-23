@@ -69,12 +69,12 @@ class OpenAiSAIConverter:
 
                 messages.append({
                     "role": role,
-                    "content": "RESULTADO DE EJECUCIÓN: " + output
+                    "content": output
                 })
 
         # Preparar kwargs para LiteLLM
         kwargs = {
-            "model": openai_request.get("model", "claude-sonnet-4-5-20250929"),
+            "model": openai_request.get("model"),
             "temperature": openai_request.get("temperature"),
             "max_tokens": openai_request.get("max_tokens"),
             "top_p": openai_request.get("top_p"),
@@ -83,7 +83,7 @@ class OpenAiSAIConverter:
         }
 
         # Agregar tools si existen y no es lista vacía
-        tools = openai_request.get("tools") if messages[-1].get("role") != "agent" else None
+        tools = openai_request.get("tools") if messages[-1].get("role") != "agent" else None # TODO analizar si quito esto
 
         if tools is not None:
             # Omitir si es lista vacía
