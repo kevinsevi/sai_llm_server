@@ -315,8 +315,27 @@ class ResponsesHandler:
                             # Detectar si es un solo tool_call (function_call legacy)
                             if len(tool_use) == 1:
                                 tc = tool_use[0]
+                                
+                                # 🔧 FIX: Validar que tc sea un diccionario
+                                if not isinstance(tc, dict):
+                                    logger.warning(
+                                        f"⚠️ [{request_id}] tool_use[0] no es dict, es {type(tc).__name__}. Saltando."
+                                    )
+                                    continue
+                                
                                 function_name = tc.get("function", {}).get("name")
-                                function_arguments = tc.get("function", {}).get("arguments", "{}")
+                                function_arguments_raw = tc.get("function", {}).get("arguments", "{}")
+                                
+                                # 🔧 FIX CRÍTICO: Convertir dict a JSON string si es necesario
+                                if isinstance(function_arguments_raw, dict):
+                                    function_arguments = json.dumps(function_arguments_raw, ensure_ascii=False)
+                                    logger.info(
+                                        f"🔧 [{request_id}] [FUNCTION_CALL] Arguments convertidos de dict a JSON string | "
+                                        f"Keys: {list(function_arguments_raw.keys())} | "
+                                        f"JSON length: {len(function_arguments)}"
+                                    )
+                                else:
+                                    function_arguments = function_arguments_raw
 
                                 logger.info(
                                     f"🔧 [{request_id}] [FUNCTION_CALL] Detectado function_call único | "
@@ -407,6 +426,13 @@ class ResponsesHandler:
 
                                 # Agregar tool_calls iniciales con metadata
                                 for idx, tc in enumerate(tool_use):
+                                    # 🔧 FIX: Validar que tc sea un diccionario
+                                    if not isinstance(tc, dict):
+                                        logger.warning(
+                                            f"⚠️ [{request_id}] tool_use[{idx}] no es dict, es {type(tc).__name__}. Saltando."
+                                        )
+                                        continue
+                                        
                                     initial_chunk["choices"][0]["delta"]["tool_calls"].append({
                                         "index": idx,
                                         "id": tc.get("id"),
@@ -421,7 +447,17 @@ class ResponsesHandler:
 
                                 # Emitir argumentos en chunks
                                 for idx, tc in enumerate(tool_use):
-                                    arguments = tc.get("function", {}).get("arguments", "{}")
+                                    # 🔧 FIX: Validar que tc sea un diccionario
+                                    if not isinstance(tc, dict):
+                                        continue
+                                    
+                                    arguments_raw = tc.get("function", {}).get("arguments", "{}")
+                                    
+                                    # 🔧 FIX CRÍTICO: Convertir dict a JSON string si es necesario
+                                    if isinstance(arguments_raw, dict):
+                                        arguments = json.dumps(arguments_raw, ensure_ascii=False)
+                                    else:
+                                        arguments = arguments_raw
 
                                     # Dividir arguments en chunks pequeños
                                     chunk_size = 20
