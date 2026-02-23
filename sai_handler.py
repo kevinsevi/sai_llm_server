@@ -386,8 +386,9 @@ class SAILLM(CustomLLM):
         # Determinar qué mensajes van al historial
         # Excluir tanto el último user como el último tool
         indices_to_exclude = set()
-        if last_user_idx >= 0:
-            indices_to_exclude.add(last_user_idx)
+        # TODO Analizar si se debe quitar el último mensaje de chat_messages
+        # if last_user_idx >= 0:
+        #    indices_to_exclude.add(last_user_idx)
         if last_tool_idx >= 0:
             indices_to_exclude.add(last_tool_idx)
         
