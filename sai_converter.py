@@ -29,6 +29,11 @@ class OpenAiSAIConverter:
 
         # Convertir mensajes
         for msg in openai_request.get("messages", []):
+            # 🔧 FIX: Validar que msg sea un diccionario
+            if not isinstance(msg, dict):
+                logger.warning(f"[CONVERTER] msg no es dict, es {type(msg).__name__}. Saltando.")
+                continue
+                
             role = msg.get("role")
             content = msg.get("content")
 
@@ -44,33 +49,52 @@ class OpenAiSAIConverter:
 
         # Procesar input si existe
         input_messages = openai_request.get("input", [])
-        for input_msg in input_messages:
-            if input_msg.get("type") == "message":
-                role = input_msg.get("role")
-                content_items = input_msg.get("content", [])
+        
+        # 🔧 FIX: Si input_messages es un string, asignarlo directamente
+        if isinstance(input_messages, str):
+            text_content = input_messages
+            messages.append({
+                "role": "user",
+                "content": text_content
+            })
+        else:
+            # Procesar como lista de mensajes
+            for input_msg in input_messages:
+                # 🔧 FIX: Validar que input_msg sea un diccionario antes de usar .get()
+                if not isinstance(input_msg, dict):
+                    logger.warning(f"[CONVERTER] input_msg no es dict, es {type(input_msg).__name__}: {input_msg} Saltando.")
+                    continue
+                
+                if input_msg.get("type") == "message":
+                    role = input_msg.get("role")
+                    content_items = input_msg.get("content", [])
 
-                # Extraer texto de los items de contenido
-                text_parts = []
-                for content_item in content_items:
-                    text = content_item.get("text", "")
-                    if text:
-                        text_parts.append(text)
+                    # Extraer texto de los items de contenido
+                    text_parts = []
+                    for content_item in content_items:
+                        # 🔧 FIX: Validar que content_item sea un diccionario
+                        if not isinstance(content_item, dict):
+                            continue
+                        
+                        text = content_item.get("text", "")
+                        if text:
+                            text_parts.append(text)
 
-                # Unir todos los textos y agregar el mensaje
-                if text_parts:
-                    text_content = "\n".join(text_parts)
+                    # Unir todos los textos y agregar el mensaje
+                    if text_parts:
+                        text_content = "\n".join(text_parts)
+                        messages.append({
+                            "role": role,
+                            "content": text_content
+                        })
+                elif input_msg.get("type") == "function_call_output":
+                    role = "user"
+                    output = input_msg.get("output")
+
                     messages.append({
                         "role": role,
-                        "content": text_content
+                        "content": output
                     })
-            elif input_msg.get("type") == "function_call_output":
-                role = "agent"
-                output = input_msg.get("output")
-
-                messages.append({
-                    "role": role,
-                    "content": output
-                })
 
         # Preparar kwargs para LiteLLM
         kwargs = {
@@ -83,7 +107,14 @@ class OpenAiSAIConverter:
         }
 
         # Agregar tools si existen y no es lista vacía
-        tools = openai_request.get("tools") if messages[-1].get("role") != "agent" else None # TODO analizar si quito esto
+        # 🔧 FIX: Validar que messages no esté vacío y que el último elemento sea un dict
+        tools = None
+        if messages and isinstance(messages[-1], dict):
+            if messages[-1].get("role") != "agent":
+                tools = openai_request.get("tools")
+        elif not messages:
+            # Si no hay mensajes, intentar obtener tools directamente
+            tools = openai_request.get("tools")
 
         if tools is not None:
             # Omitir si es lista vacía
