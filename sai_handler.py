@@ -480,7 +480,7 @@ class SAILLM(CustomLLM):
         if not (isinstance(obj, dict) and "tool_calls" in obj):
             return None, None, None, None
 
-        tool_calls = _normalize_tool_calls(obj.get("tool_calls"), request_id)
+        tool_calls = self._normalize_tool_calls(obj.get("tool_calls"), request_id)
         if not tool_calls:
             return None, None, None, None
 
