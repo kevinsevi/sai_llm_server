@@ -147,6 +147,10 @@ class ChatCompletionsHandler:
                     # Extraer tool_use del chunk
                     tool_use = chunk.get('tool_use') if isinstance(chunk, dict) else getattr(chunk, 'tool_use', None)
 
+                    # Normalizar tool_use a lista (puede venir como dict o un solo objeto)
+                    if tool_use and not isinstance(tool_use, list):
+                        tool_use = [tool_use]
+
                     # Si hay tool_calls, emitirlos en formato streaming
                     if tool_use and not tool_calls_emitted:
                         # Chunk inicial con role
@@ -186,6 +190,10 @@ class ChatCompletionsHandler:
                         # Emitir argumentos en chunks
                         for idx, tc in enumerate(tool_use):
                             arguments = tc.get("function", {}).get("arguments", "{}")
+
+                            # Asegurar que arguments sea string antes de hacer slicing
+                            if not isinstance(arguments, str):
+                                arguments = json.dumps(arguments, ensure_ascii=False)
 
                             # Dividir arguments en chunks pequeños
                             chunk_size = 20
