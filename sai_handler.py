@@ -432,6 +432,61 @@ class SAILLM(CustomLLM):
 
         return system_prompt, user_prompt, tool_prompt, tool_call_id, chat_messages
 
+    def _normalize_tool_calls(self, tool_calls, request_id: str) -> Optional[list]:
+        if not tool_calls:
+            return None
+        if not isinstance(tool_calls, list):
+            tool_calls = [tool_calls]
+
+        normalized = []
+        for i, tc in enumerate(tool_calls):
+            if not isinstance(tc, dict):
+                continue
+
+            # A) Estilo OpenAI-ish
+            if tc.get("type") == "function" and isinstance(tc.get("function"), dict):
+                fn = tc.get("function") or {}
+                name = fn.get("name")
+                arguments = fn.get("arguments", "{}")
+            # B) Estilo compacto
+            else:
+                name = tc.get("name")
+                arguments = tc.get("arguments", "{}")
+
+            if not name:
+                continue
+
+            normalized.append({
+                "id": tc.get("id", f"call_{request_id}_{i}"),
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "arguments": arguments if isinstance(arguments, str) else json.dumps(arguments, ensure_ascii=False)
+                }
+            })
+        return normalized or None
+
+    def _try_parse_from(self, start_idx: int, request_id: str, trimmed, decoder) -> tuple[Optional[list], Optional[int], Optional[int], Optional[str]]:
+        candidate = trimmed[start_idx:]
+        try:
+            obj, end = decoder.raw_decode(candidate)
+        except Exception:
+            return None, None, None, None
+
+        # Debe consumir todo el final salvo whitespace
+        if candidate[end:].strip():
+            return None, None, None, None
+
+        if not (isinstance(obj, dict) and "tool_calls" in obj):
+            return None, None, None, None
+
+        tool_calls = _normalize_tool_calls(obj.get("tool_calls"), request_id)
+        if not tool_calls:
+            return None, None, None, None
+
+        json_raw = candidate[:end]
+        return tool_calls, start_idx, start_idx + end, json_raw
+
     def _extract_tool_calls_from_plain_text_end(
             self,
             response_text: Optional[str],
@@ -452,73 +507,162 @@ class SAILLM(CustomLLM):
             logger.info(f"🧪 [{request_id}] [TOOLS] extractor: trimmed vacío")
             return None, ""
 
+        # NUEVA LÓGICA: Detectar y extraer JSON dentro de bloques markdown ```json ... ```
+        markdown_json_pattern = r'```json\s*\n(.+?)\n```\s*$'
+        import re
+        markdown_match = re.search(markdown_json_pattern, trimmed, re.DOTALL)
+        
+        if markdown_match:
+            json_content = markdown_match.group(1).strip()
+            logger.info(
+                f"🧪 [{request_id}] [TOOLS] Detectado JSON en bloque markdown | "
+                f"json_len={len(json_content)} | "
+                f"preview={json_content[:100]!r}"
+            )
+            
+            try:
+                # Intentar parsear el JSON extraído
+                obj = json.loads(json_content)
+                
+                # Verificar si es un dict válido
+                if isinstance(obj, dict):
+                    # Caso 1: El JSON tiene 'name' y opcionalmente 'parameters'
+                    if "name" in obj:
+                        tool_name = obj["name"]
+                        # Si tiene 'parameters', usarlo; sino, usar el objeto completo sin 'name'
+                        if "parameters" in obj:
+                            arguments = obj["parameters"]
+                        else:
+                            # Remover 'name' y usar el resto como arguments
+                            arguments = {k: v for k, v in obj.items() if k != "name"}
+                    else:
+                        # Caso 2: No tiene 'name' - asumir que TODO el JSON son los parámetros
+                        tool_name = "exec_command"
+                        arguments = obj  # El JSON completo son los argumentos
+                    
+                    # Convertir formato compacto a formato OpenAI
+                    # IMPORTANTE: arguments debe ser dict, NO string JSON
+                    tool_calls = [{
+                        "id": f"call_{request_id}_0",
+                        "type": "function",
+                        "function": {
+                            "name": tool_name,
+                            "arguments": arguments  # ← Dict directo, NO json.dumps()
+                        }
+                    }]
+                
+                    # Remover el bloque markdown del texto
+                    cleaned = trimmed[:markdown_match.start()].rstrip()
+                
+                    after_tail = cleaned[-500:] if len(cleaned) > 500 else cleaned
+                    
+                    # Log diferenciado según si se usó el default
+                    if "name" not in obj:
+                        logger.info(
+                            f"🔧 [{request_id}] [TOOLS] AFTER extracted (markdown) | "
+                            f"Campo 'name' ausente → usando default 'exec_command' | "
+                            f"cleaned_len={len(cleaned)} | "
+                            f"tool_calls_count=1 | "
+                            f"arguments_keys={list(arguments.keys()) if isinstance(arguments, dict) else 'N/A'} | "
+                            f"json_removed_len={len(markdown_match.group(0))} | "
+                            f"cleaned_tail_preview={after_tail!r}"
+                        )
+                    else:
+                        logger.info(
+                            f"🧪 [{request_id}] [TOOLS] AFTER extracted (markdown) | "
+                            f"cleaned_len={len(cleaned)} | "
+                            f"tool_calls_count=1 | "
+                            f"tool_name={tool_name} | "
+                            f"arguments_keys={list(arguments.keys()) if isinstance(arguments, dict) else 'N/A'} | "
+                            f"json_removed_len={len(markdown_match.group(0))} | "
+                            f"cleaned_tail_preview={after_tail!r}"
+                        )
+                
+                    return tool_calls, cleaned
+                else:
+                    # JSON válido pero no es un dict
+                    logger.warning(
+                        f"⚠️ [{request_id}] [TOOLS] JSON en markdown válido pero no es dict | "
+                        f"Tipo: {type(obj).__name__} | "
+                        f"Se retorna texto sin modificar"
+                    )
+                    return None, text
+                    
+            except json.JSONDecodeError as e:
+                # JSON inválido en bloque markdown - ERROR CRÍTICO
+                logger.error(
+                    f"❌ [{request_id}] [TOOLS] JSON en markdown INVÁLIDO | "
+                    f"error={str(e)} | "
+                    f"json_preview={json_content[:200]!r} | "
+                    f"Acción: Retornando texto sin modificar (NO se ejecutará fallback scan)"
+                )
+                # CAMBIO CRÍTICO: Retornar inmediatamente, NO continuar con fallback
+                return None, text
+
+        # NUEVO: Detectar JSON plano al final (sin markdown, sin wrapper tool_calls)
+        if trimmed.endswith("}"):
+            # Intentar parsear desde el último '{' hacia atrás
+            brace_positions = [i for i, ch in enumerate(trimmed) if ch == "{"]
+            
+            for start_idx in reversed(brace_positions):
+                candidate = trimmed[start_idx:]
+                try:
+                    obj = json.loads(candidate)
+                    
+                    # Verificar que sea un dict válido
+                    if not isinstance(obj, dict):
+                        continue
+                    
+                    # Verificar que el JSON consuma todo el final (sin texto después)
+                    if trimmed[start_idx + len(json.dumps(obj, ensure_ascii=False)):].strip():
+                        continue
+                    
+                    # Caso 1: Tiene 'name' → es un tool call directo
+                    if "name" in obj:
+                        tool_name = obj["name"]
+                        arguments = obj.get("parameters", {k: v for k, v in obj.items() if k != "name"})
+                    else:
+                        # Caso 2: No tiene 'name' → asumir exec_command
+                        tool_name = "exec_command"
+                        arguments = obj
+                    
+                    # Construir tool_call
+                    tool_calls = [{
+                        "id": f"call_{request_id}_0",
+                        "type": "function",
+                        "function": {
+                            "name": tool_name,
+                            "arguments": arguments
+                        }
+                    }]
+                    
+                    # Remover el JSON del texto
+                    cleaned = trimmed[:start_idx].rstrip()
+                    
+                    logger.info(
+                        f"🔧 [{request_id}] [TOOLS] AFTER extracted (plain JSON) | "
+                        f"tool_name={tool_name} | "
+                        f"cleaned_len={len(cleaned)} | "
+                        f"json_removed_len={len(candidate)} | "
+                        f"arguments_keys={list(arguments.keys()) if isinstance(arguments, dict) else 'N/A'}"
+                    )
+                    
+                    return tool_calls, cleaned
+                    
+                except json.JSONDecodeError:
+                    continue
+
+        # Lógica original: detectar JSON sin markdown (solo si NO hay bloque markdown)
         if not trimmed.endswith("}"):
             logger.info(f"[{request_id}] [TOOLS] extractor: no termina en '}}' -> no hay JSON final")
             return None, text
 
         decoder = json.JSONDecoder()
 
-        def _normalize_tool_calls(tool_calls) -> Optional[list]:
-            # ... existing code ...
-            if not tool_calls:
-                return None
-            if not isinstance(tool_calls, list):
-                tool_calls = [tool_calls]
-
-            normalized = []
-            for i, tc in enumerate(tool_calls):
-                if not isinstance(tc, dict):
-                    continue
-
-                # A) Estilo OpenAI-ish
-                if tc.get("type") == "function" and isinstance(tc.get("function"), dict):
-                    fn = tc.get("function") or {}
-                    name = fn.get("name")
-                    arguments = fn.get("arguments", "{}")
-                # B) Estilo compacto
-                else:
-                    name = tc.get("name")
-                    arguments = tc.get("arguments", "{}")
-
-                if not name:
-                    continue
-
-                normalized.append({
-                    "id": tc.get("id", f"call_{request_id}_{i}"),
-                    "type": "function",
-                    "function": {
-                        "name": name,
-                        "arguments": arguments if isinstance(arguments, str) else json.dumps(arguments, ensure_ascii=False)
-                    }
-                })
-            return normalized or None
-
-        def _try_parse_from(start_idx: int) -> tuple[Optional[list], Optional[int], Optional[int], Optional[str]]:
-            # ... existing code ...
-            candidate = trimmed[start_idx:]
-            try:
-                obj, end = decoder.raw_decode(candidate)
-            except Exception:
-                return None, None, None, None
-
-            # Debe consumir todo el final salvo whitespace
-            if candidate[end:].strip():
-                return None, None, None, None
-
-            if not (isinstance(obj, dict) and "tool_calls" in obj):
-                return None, None, None, None
-
-            tool_calls = _normalize_tool_calls(obj.get("tool_calls"))
-            if not tool_calls:
-                return None, None, None, None
-
-            json_raw = candidate[:end]
-            return tool_calls, start_idx, start_idx + end, json_raw
-
         # 1) Camino rápido: buscar el marcador {"tool_calls" desde el final
         marker_idx = trimmed.rfind('{"tool_calls"')
         if marker_idx != -1:
-            tool_calls, js, je, json_raw = _try_parse_from(marker_idx)
+            tool_calls, js, je, json_raw = self._try_parse_from(marker_idx, request_id, trimmed, decoder)
             if tool_calls:
                 cleaned = trimmed[:js].rstrip()
 
@@ -532,8 +676,6 @@ class SAILLM(CustomLLM):
                     f"cleaned_tail_preview={after_tail!r}"
                 )
 
-                print(f"[{request_id}] [TOOLS] FOUND via marker at {marker_idx} | tool_calls_count={len(tool_calls)} | json_len={len(json_raw)}")
-                print(f"[{request_id}] [TOOLS] AFTER cleaned_len={len(cleaned)} cleaned_tail_preview={after_tail!r}")
                 return tool_calls, cleaned
 
         # 2) Fallback: escanear todos los '{' hacia atrás (evita caer en '{' dentro de strings)
@@ -542,7 +684,7 @@ class SAILLM(CustomLLM):
         logger.info(f"🧪 [{request_id}] [TOOLS] fallback scan: brace_positions={len(brace_positions)}")
 
         for start_idx in reversed(brace_positions):
-            tool_calls, js, je, json_raw = _try_parse_from(start_idx)
+            tool_calls, js, je, json_raw = self._try_parse_from(start_idx, request_id, trimmed, decoder)
             if tool_calls:
                 cleaned = trimmed[:js].rstrip()
 
@@ -556,8 +698,6 @@ class SAILLM(CustomLLM):
                     f"cleaned_tail_preview={after_tail!r}"
                 )
 
-                print(f"[{request_id}] [TOOLS] FOUND via scan at {start_idx} | tool_calls_count={len(tool_calls)} | json_len={len(json_raw)}")
-                print(f"[{request_id}] [TOOLS] AFTER cleaned_len={len(cleaned)} cleaned_tail_preview={after_tail!r}")
                 return tool_calls, cleaned
 
         # No se encontró JSON tool_calls al final
