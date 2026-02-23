@@ -507,9 +507,73 @@ class SAILLM(CustomLLM):
             logger.info(f"🧪 [{request_id}] [TOOLS] extractor: trimmed vacío")
             return None, ""
 
+        # NUEVO: Detectar formato {"cmd": ["tool_name", "args"]} de SAI
+        # CRÍTICO: Buscar el patrón {"cmd": específicamente, no cualquier {
+        import re
+
+        # Buscar el último {"cmd": en el texto
+        cmd_marker = '{"cmd":'
+        last_cmd_idx = trimmed.rfind(cmd_marker)
+
+        if last_cmd_idx != -1:
+            # Intentar parsear desde ese punto hasta el final
+            candidate = trimmed[last_cmd_idx:]
+            try:
+                # Parsear el JSON completo
+                obj = json.loads(candidate)
+
+                # Verificar si tiene la estructura {"cmd": [...]}
+                if isinstance(obj, dict) and "cmd" in obj:
+                    cmd_value = obj["cmd"]
+                    if isinstance(cmd_value, list) and len(cmd_value) >= 2:
+                        tool_name = cmd_value[0]
+                        raw_args = cmd_value[1]
+
+                        logger.info(
+                            f"🔧 [{request_id}] [TOOLS] Detectado formato SAI cmd | "
+                            f"tool_name={tool_name} | "
+                            f"args_len={len(str(raw_args))} | "
+                            f"args_preview={str(raw_args)[:100]!r}"
+                        )
+
+                        # Construir arguments según el tool
+                        if tool_name == "apply_patch":
+                            arguments = {"patch": raw_args}
+                        elif tool_name == "exec_command":
+                            arguments = {"command": raw_args}
+                        else:
+                            arguments = {"input": raw_args}
+
+                        tool_calls = [{
+                            "id": f"call_{request_id}_0",
+                            "type": "function",
+                            "function": {
+                                "name": tool_name,
+                                "arguments": arguments
+                            }
+                        }]
+
+                        # Remover el JSON del texto
+                        cleaned = trimmed[:last_cmd_idx].rstrip()
+
+                        logger.info(
+                            f"🔧 [{request_id}] [TOOLS] AFTER extracted (SAI cmd format) | "
+                            f"tool_name={tool_name} | "
+                            f"cleaned_len={len(cleaned)} | "
+                            f"json_removed_len={len(candidate)} | "
+                            f"arguments_keys={list(arguments.keys())}"
+                        )
+
+                        return tool_calls, cleaned
+            except json.JSONDecodeError as e:
+                logger.warning(
+                    f"⚠️ [{request_id}] [TOOLS] JSON inválido después de {cmd_marker} | "
+                    f"error={str(e)} | "
+                    f"candidate_preview={candidate[:200]!r}"
+                )
+
         # NUEVA LÓGICA: Detectar y extraer JSON dentro de bloques markdown ```json ... ```
         markdown_json_pattern = r'```json\s*\n(.+?)\n```\s*$'
-        import re
         markdown_match = re.search(markdown_json_pattern, trimmed, re.DOTALL)
         
         if markdown_match:
@@ -601,10 +665,17 @@ class SAILLM(CustomLLM):
 
         # NUEVO: Detectar JSON plano al final (sin markdown, sin wrapper tool_calls)
         if trimmed.endswith("}"):
-            # Intentar parsear desde el último '{' hacia atrás
+            # MEJORA: Limpiar saltos de línea antes del JSON
+            # Buscar el último bloque JSON válido, ignorando \n antes de él
             brace_positions = [i for i, ch in enumerate(trimmed) if ch == "{"]
             
             for start_idx in reversed(brace_positions):
+                # Verificar si hay solo whitespace/newlines antes del '{'
+                prefix = trimmed[:start_idx]
+                # Si hay texto significativo muy cerca del JSON, no es un tool call aislado
+                if prefix and not prefix[-20:].strip().endswith(('.', '!', '?', '\n', ':')):
+                    continue
+
                 candidate = trimmed[start_idx:]
                 try:
                     obj = json.loads(candidate)
@@ -616,16 +687,24 @@ class SAILLM(CustomLLM):
                     # Verificar que el JSON consuma todo el final (sin texto después)
                     if trimmed[start_idx + len(json.dumps(obj, ensure_ascii=False)):].strip():
                         continue
-                    
+
                     # Caso 1: Tiene 'name' → es un tool call directo
                     if "name" in obj:
                         tool_name = obj["name"]
                         arguments = obj.get("parameters", {k: v for k, v in obj.items() if k != "name"})
-                    else:
-                        # Caso 2: No tiene 'name' → asumir exec_command
+                    # Caso 2: Tiene 'cmd' o 'command' → es exec_command
+                    elif "cmd" in obj or "command" in obj:
                         tool_name = "exec_command"
                         arguments = obj
-                    
+                    # Caso 3: Tiene 'path' o 'file' → podría ser apply_patch
+                    elif "path" in obj or "file" in obj or "patch" in obj:
+                        tool_name = "apply_patch"
+                        arguments = obj
+                    else:
+                        # Caso 4: No tiene 'name' → asumir exec_command por defecto
+                        tool_name = "exec_command"
+                        arguments = obj
+
                     # Construir tool_call
                     tool_calls = [{
                         "id": f"call_{request_id}_0",
@@ -635,10 +714,10 @@ class SAILLM(CustomLLM):
                             "arguments": arguments
                         }
                     }]
-                    
-                    # Remover el JSON del texto
+
+                    # Remover el JSON del texto (y los \n antes de él)
                     cleaned = trimmed[:start_idx].rstrip()
-                    
+
                     logger.info(
                         f"🔧 [{request_id}] [TOOLS] AFTER extracted (plain JSON) | "
                         f"tool_name={tool_name} | "
@@ -646,7 +725,7 @@ class SAILLM(CustomLLM):
                         f"json_removed_len={len(candidate)} | "
                         f"arguments_keys={list(arguments.keys()) if isinstance(arguments, dict) else 'N/A'}"
                     )
-                    
+
                     return tool_calls, cleaned
                     
                 except json.JSONDecodeError:
@@ -725,13 +804,13 @@ class SAILLM(CustomLLM):
             logger.info(f"🔧 [{request_id}] [TOOLS] tools es lista vacía [] - omitiendo para evitar falsos positivos")
         
         # NUEVA LÓGICA: Detectar si hay mensajes con role="tool"
-        has_tool_messages = any(msg.get("role") == "tool" for msg in messages if isinstance(msg, dict))
-        if has_tool_messages and tools is not None:
-            logger.info(
-                f"🔧 [{request_id}] [TOOLS] Mensajes con role='tool' detectados | "
-                f"Acción: Eliminando tools de la entrada (se espera respuesta, no tool_calls)"
-            )
-            tools = None
+        #has_tool_messages = any(msg.get("role") == "tool" for msg in messages if isinstance(msg, dict))
+        #if has_tool_messages and tools is not None:
+        #    logger.info(
+        #        f"🔧 [{request_id}] [TOOLS] Mensajes con role='tool' detectados | "
+        #        f"Acción: Eliminando tools de la entrada (se espera respuesta, no tool_calls)"
+        #    )
+        #    tools = None
         
         has_tools = bool(tools)  # Guardar si hay tools en la entrada
         if has_tools:
@@ -761,6 +840,13 @@ class SAILLM(CustomLLM):
             logger.info(f"🧪 [{request_id}] [TOOLS] completion(): NO tools en entrada -> extractor OMITIDO")
 
         if tool_calls:
+            # Log para debug: imprimir tool_calls antes de retornar
+            logger.info(
+                f"🔍 [{request_id}] [DEBUG] tool_calls a retornar | "
+                f"Count: {len(tool_calls)} | "
+                f"Content: {json.dumps(tool_calls, indent=2, ensure_ascii=False)}"
+            )
+
             response = ModelResponse(
                 usage={
                     "prompt_tokens": usage_data["prompt_tokens"],
@@ -826,13 +912,13 @@ class SAILLM(CustomLLM):
             logger.info(f"🔧 [{request_id}] [TOOLS] tools es lista vacía [] - omitiendo para evitar falsos positivos")
         
         # NUEVA LÓGICA: Detectar si hay mensajes con role="tool"
-        has_tool_messages = any(msg.get("role") == "tool" for msg in messages if isinstance(msg, dict))
-        if has_tool_messages and tools is not None:
-            logger.info(
-                f"🔧 [{request_id}] [TOOLS] Mensajes con role='tool' detectados | "
-                f"Acción: Eliminando tools de la entrada (se espera respuesta, no tool_calls)"
-            )
-            tools = None
+        #has_tool_messages = any(msg.get("role") == "tool" for msg in messages if isinstance(msg, dict))
+        #if has_tool_messages and tools is not None:
+        #    logger.info(
+        #        f"🔧 [{request_id}] [TOOLS] Mensajes con role='tool' detectados | "
+        #        f"Acción: Eliminando tools de la entrada (se espera respuesta, no tool_calls)"
+        #    )
+        #    tools = None
         
         has_tools = bool(tools)  # Guardar si hay tools en la entrada
         logger.info(f"🧪 [{request_id}] [TOOLS] acompletion(): tools_present={has_tools} tools_type={type(tools).__name__ if tools else 'None'}")
@@ -879,6 +965,13 @@ class SAILLM(CustomLLM):
         logger.info(f"🧪 [{request_id}] [TOOLS] acompletion(): extracted_tool_calls={bool(tool_calls)} cleaned_len={len(cleaned_text)}")
 
         if tool_calls:
+            # Log para debug: imprimir tool_calls antes de retornar
+            logger.info(
+                f"🔍 [{request_id}] [DEBUG] tool_calls a retornar (async) | "
+                f"Count: {len(tool_calls)} | "
+                f"Content: {json.dumps(tool_calls, indent=2, ensure_ascii=False)}"
+            )
+
             response = ModelResponse(
                 usage={
                     "prompt_tokens": usage_data["prompt_tokens"],
