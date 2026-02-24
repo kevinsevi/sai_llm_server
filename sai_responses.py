@@ -19,7 +19,7 @@ class ResponsesHandler:
         # Timestamp de inicio
         created_at = int(time.time())
 
-        litellm_response = await sai_llm.acompletion(messages=messages, **kwargs)
+        litellm_response = await sai_llm.acompletion(request_id, messages=messages, **kwargs)
 
         # Timestamp de finalización
         completed_at = int(time.time())
@@ -201,7 +201,7 @@ class ResponsesHandler:
 
                 try:
                     # Almacenar el generador en una variable antes de iterar
-                    stream_generator = sai_llm.astreaming(messages=messages, **kwargs)
+                    stream_generator = sai_llm.astreaming(request_id, messages=messages, **kwargs)
 
                     # Variables para tracking
                     chunk_count = 0
