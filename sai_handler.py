@@ -337,8 +337,8 @@ class SAILLM(CustomLLM):
         system_prompt = ""
         processed_messages = messages
 
-        if messages and messages[0].get("role") in ("system", "developer"):
-            system_prompt = messages[0].get("content", "")
+        if messages and messages[0].get("role") in "system":
+            system_prompt = messages[0].get("content")
             processed_messages = messages[1:]
             logger.info(
                 f"📋 [{request_id}] System prompt detectado | "
@@ -405,7 +405,7 @@ class SAILLM(CustomLLM):
             
             # Los mensajes tool que NO son el último se agregan al historial como user
             if role == "tool":
-                tc_id = msg.get("tool_call_id", "unknown")
+                tc_id = msg.get("tool_call_id")
                 tool_content = f"[Tool Response - ID: {tc_id}]\n{content}"
                 
                 chat_messages.append({
