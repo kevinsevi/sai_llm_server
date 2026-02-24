@@ -249,7 +249,7 @@ async def messages_endpoint(request: Request):
 
         # Llamar a SAI
         logger.info(f"🚀 [{request_id}] Llamando a sai_llm.acompletion()...")
-        litellm_response = await sai_llm.acompletion(messages=messages, **kwargs)
+        litellm_response = await sai_llm.acompletion(request_id, messages=messages, **kwargs)
 
         # Convertir respuesta a formato OpenAI
         model = body.get("model")
