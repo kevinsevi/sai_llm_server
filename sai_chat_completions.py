@@ -138,7 +138,7 @@ class ChatCompletionsHandler:
                 first_content_chunk = True
                 created_timestamp = int(time.time())
 
-                async for chunk in sai_llm.astreaming(messages=messages, **kwargs):
+                async for chunk in sai_llm.astreaming(request_id, messages=messages, **kwargs):
                     chunk_count += 1
 
                     if chunk_count == 1:
