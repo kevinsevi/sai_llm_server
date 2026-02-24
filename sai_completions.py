@@ -11,7 +11,7 @@ class CompletionsHandler:
     async def completions_non_streaming(self, request_id: str, messages: list, kwargs: dict, model: str):
         """Maneja requests de completions sin streaming"""
         logger.info(f"🚀 [{request_id}] Llamando a sai_llm.acompletion()...")
-        litellm_response = await sai_llm.acompletion(messages=messages, **kwargs)
+        litellm_response = await sai_llm.acompletion(request_id, messages=messages, **kwargs)
 
         # Extraer texto
         text = ""
@@ -82,7 +82,7 @@ class CompletionsHandler:
 
                 chunk_count = 0
 
-                async for chunk in sai_llm.astreaming(messages=messages, **kwargs):
+                async for chunk in sai_llm.astreaming(request_id, messages=messages, **kwargs):
                     chunk_count += 1
 
                     if chunk_count == 1:
