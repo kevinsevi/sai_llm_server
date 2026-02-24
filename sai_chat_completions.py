@@ -12,7 +12,7 @@ class ChatCompletionsHandler:
     async def chat_completions_non_streaming(self, request_id: str, messages: list, kwargs: dict, model: str):
         """Maneja requests de chat completions sin streaming."""
         logger.info(f"🚀 [{request_id}] Llamando a sai_llm.acompletion()...")
-        litellm_response = await sai_llm.acompletion(messages=messages, **kwargs)
+        litellm_response = await sai_llm.acompletion(request_id, messages=messages, **kwargs)
 
         # Extraer texto y tool_calls
         text = ""
