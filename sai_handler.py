@@ -892,9 +892,7 @@ class SAILLM(CustomLLM):
         return response
 
     # ---------------- Asíncrono ----------------
-    async def acompletion(self, messages=None, **kwargs) -> ModelResponse:
-        request_id = kwargs.pop('_request_id', None) or str(uuid.uuid4())[:8]
-
+    async def acompletion(self, request_id, messages=None, **kwargs) -> ModelResponse:
         if VERBOSE_LOGGING:
             logger.debug(f"⚙️ [{request_id}] kwargs recibidos en acompletion: {kwargs}")
 
@@ -1016,10 +1014,7 @@ class SAILLM(CustomLLM):
         return response
 
     # ---------------- Streaming ----------------
-    async def astreaming(self, messages=None, **kwargs) -> AsyncIterator[GenericStreamingChunk]:
-        # Generar request_id siempre (independiente de VERBOSE_LOGGING)
-        request_id = str(uuid.uuid4())[:8]
-
+    async def astreaming(self, request_id, messages=None, **kwargs) -> AsyncIterator[GenericStreamingChunk]:
         # Log detallado de kwargs solo si VERBOSE_LOGGING está activado
         if VERBOSE_LOGGING:
             logger.debug(f"⚙️ [{request_id}] kwargs recibidos en astreaming: {kwargs}")
@@ -1027,7 +1022,7 @@ class SAILLM(CustomLLM):
         # Pasar el request_id y todos los kwargs a acompletion
         kwargs['_request_id'] = request_id
 
-        response = await self.acompletion(messages, **kwargs)
+        response = await self.acompletion(request_id, messages, **kwargs)
 
         # Extraer texto y tool_calls de la respuesta
         text = None
