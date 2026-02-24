@@ -88,7 +88,7 @@ class OpenAiSAIConverter:
                             "content": text_content
                         })
                 elif input_msg.get("type") == "function_call_output":
-                    role = "tool"
+                    role = "user"
                     output = input_msg.get("output")
 
                     messages.append({
