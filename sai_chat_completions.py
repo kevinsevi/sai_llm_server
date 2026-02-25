@@ -153,7 +153,7 @@ class ChatCompletionsHandler:
 
                     # Si hay tool_calls, emitirlos en formato streaming
                     if tool_use and not tool_calls_emitted:
-                        # Chunk inicial con role
+                        # Chunk inicial con role, content: null, refusal: null y tool_calls completos
                         initial_chunk = {
                             "id": f"chatcmpl-{request_id}",
                             "object": "chat.completion.chunk",
@@ -166,14 +166,17 @@ class ChatCompletionsHandler:
                                     "index": 0,
                                     "delta": {
                                         "role": "assistant",
-                                        "tool_calls": []
+                                        "content": None,
+                                        "tool_calls": [],
+                                        "refusal": None
                                     },
                                     "finish_reason": None
                                 }
-                            ]
+                            ],
+                            "usage": None
                         }
 
-                        # Agregar tool_calls iniciales con metadata
+                        # Agregar tool_calls iniciales con metadata completa
                         for idx, tc in enumerate(tool_use):
                             initial_chunk["choices"][0]["delta"]["tool_calls"].append({
                                 "index": idx,
@@ -187,7 +190,7 @@ class ChatCompletionsHandler:
 
                         yield f"data: {json.dumps(initial_chunk)}\n\n"
 
-                        # Emitir argumentos en chunks
+                        # Emitir argumentos en chunks muy pequeños (2-5 caracteres)
                         for idx, tc in enumerate(tool_use):
                             arguments = tc.get("function", {}).get("arguments", "{}")
 
@@ -195,8 +198,8 @@ class ChatCompletionsHandler:
                             if not isinstance(arguments, str):
                                 arguments = json.dumps(arguments, ensure_ascii=False)
 
-                            # Dividir arguments en chunks pequeños
-                            chunk_size = 20
+                            # Dividir arguments en chunks MUY pequeños (2-5 caracteres como OpenAI)
+                            chunk_size = 3  # Reducido de 20 a 3 para imitar OpenAI
                             for i in range(0, len(arguments), chunk_size):
                                 arg_chunk = arguments[i:i + chunk_size]
 
@@ -222,7 +225,8 @@ class ChatCompletionsHandler:
                                             },
                                             "finish_reason": None
                                         }
-                                    ]
+                                    ],
+                                    "usage": None
                                 }
                                 yield f"data: {json.dumps(arg_delta_chunk)}\n\n"
 
@@ -280,7 +284,7 @@ class ChatCompletionsHandler:
                     if is_finished:
                         finish_reason = chunk.get('finish_reason') if isinstance(chunk, dict) else getattr(chunk, 'finish_reason', 'stop')
 
-                        # Chunk final
+                        # Chunk final con delta vacío
                         final_chunk = {
                             "id": f"chatcmpl-{request_id}",
                             "object": "chat.completion.chunk",
@@ -294,9 +298,37 @@ class ChatCompletionsHandler:
                                     "delta": {},
                                     "finish_reason": finish_reason or "stop"
                                 }
-                            ]
+                            ],
+                            "usage": None
                         }
                         yield f"data: {json.dumps(final_chunk)}\n\n"
+
+                        # Chunk de usage (antes de [DONE])
+                        usage_chunk = {
+                            "id": f"chatcmpl-{request_id}",
+                            "object": "chat.completion.chunk",
+                            "created": created_timestamp,
+                            "model": model,
+                            "service_tier": "default",
+                            "system_fingerprint": None,
+                            "choices": [],
+                            "usage": {
+                                "prompt_tokens": chunk.get('usage', {}).get('prompt_tokens', 0) if isinstance(chunk, dict) else 0,
+                                "completion_tokens": chunk.get('usage', {}).get('completion_tokens', 0) if isinstance(chunk, dict) else 0,
+                                "total_tokens": chunk.get('usage', {}).get('total_tokens', 0) if isinstance(chunk, dict) else 0,
+                                "prompt_tokens_details": {
+                                    "cached_tokens": 0,
+                                    "audio_tokens": 0
+                                },
+                                "completion_tokens_details": {
+                                    "reasoning_tokens": 0,
+                                    "audio_tokens": 0,
+                                    "accepted_prediction_tokens": 0,
+                                    "rejected_prediction_tokens": 0
+                                }
+                            }
+                        }
+                        yield f"data: {json.dumps(usage_chunk)}\n\n"
 
                 # Enviar [DONE]
                 yield "data: [DONE]\n\n"
