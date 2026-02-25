@@ -92,6 +92,7 @@ class OpenAiSAIConverter:
                     output = input_msg.get("output")
 
                     messages.append({
+                        "type": input_msg.get("type"),
                         "role": role,
                         "content": output
                     })
