@@ -368,6 +368,7 @@ class SAILLM(CustomLLM):
 
         # Extraer user prompt (último mensaje que NO sea tool)
         user_prompt = ""
+        type_prompt = ""  # ← INICIALIZAR AQUÍ para evitar UnboundLocalError
         last_user_idx = -1
         
         # Buscar el último mensaje de usuario (ignorando mensajes tool)
@@ -375,6 +376,7 @@ class SAILLM(CustomLLM):
             msg = processed_messages[idx]
             if msg.get("role") != "tool":
                 user_prompt = msg.get("content", "")
+                type_prompt = msg.get("type", "")
                 last_user_idx = idx
                 logger.info(
                     f"📝 [{request_id}] User prompt detectado | "
@@ -430,7 +432,7 @@ class SAILLM(CustomLLM):
         # Validar tamaño del contexto
         self._check_context_size(total_chars, request_id)
 
-        return system_prompt, user_prompt, tool_prompt, tool_call_id, chat_messages
+        return system_prompt, user_prompt, tool_prompt, tool_call_id, chat_messages, type_prompt
 
     def _normalize_tool_calls(self, tool_calls, request_id: str) -> Optional[list]:
         if not tool_calls:
@@ -816,7 +818,7 @@ class SAILLM(CustomLLM):
         if has_tools:
             print(f"[{request_id}] [TOOLS] completion(): tools recibidas count={len(tools)}")
 
-        system, user_prompt, tool_prompt, tool_call_id, chat_messages = self._prepare_messages(messages, request_id)
+        system, user_prompt, tool_prompt, tool_call_id, chat_messages, type_prompt = self._prepare_messages(messages, request_id)
 
         response_text, finish_reason, usage_data = self._call_sai(
             system,
@@ -825,9 +827,10 @@ class SAILLM(CustomLLM):
             tool_call_id,
             chat_messages,
             request_id,
+            type_prompt,
             user_api_key=user_api_key,
             model=kwargs.get('model'),
-            tools=tools
+            tools=tools,
         )
 
         # SOLO extraer tool_calls si se enviaron tools en la entrada
@@ -921,7 +924,7 @@ class SAILLM(CustomLLM):
         has_tools = bool(tools)  # Guardar si hay tools en la entrada
         logger.info(f"🧪 [{request_id}] [TOOLS] acompletion(): tools_present={has_tools} tools_type={type(tools).__name__ if tools else 'None'}")
 
-        system, user_prompt, tool_prompt, tool_call_id, chat_messages = self._prepare_messages(messages, request_id)
+        system, user_prompt, tool_prompt, tool_call_id, chat_messages, type_prompt = self._prepare_messages(messages, request_id)
 
         loop = asyncio.get_running_loop()
 
@@ -930,7 +933,8 @@ class SAILLM(CustomLLM):
             self._call_sai, 
             user_api_key=user_api_key, 
             model=model, 
-            tools=tools
+            tools=tools,
+            type=type_prompt
         )
 
         response_text, finish_reason, usage_data = await loop.run_in_executor(
@@ -1548,7 +1552,7 @@ class SAILLM(CustomLLM):
 
     # ---------------- Llamada privada a SAI (refactorizada) ----------------
     def _call_sai(self, system: str, user: str, tool: str, tool_call_id: Optional[str], 
-                  chat_messages: list, request_id: str,
+                  chat_messages: list, request_id: str, type: str,
                   user_api_key: Optional[str] = None, model: Optional[str] = None, 
                   tools: Optional = None) -> tuple[str, str, dict]:
         # Construir URL base
@@ -1569,7 +1573,8 @@ class SAILLM(CustomLLM):
                 "system": system,
                 "user": user,
                 "tool": tool if tool else None,  # Agregar tool message
-                "tools": None  # tools definitions (se llenará después)
+                "tools": None,  # tools definitions (se llenará después)
+                "type": type
             }
         }
         
