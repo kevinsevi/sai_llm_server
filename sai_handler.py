@@ -346,38 +346,19 @@ class SAILLM(CustomLLM):
                 f"Longitud: {len(system_prompt)} chars"
             )
 
-        # Extraer tool prompt (último mensaje con role="tool")
-        tool_prompt = ""
         tool_call_id = None
         last_tool_idx = -1
         
-        # Buscar el último mensaje tool
-        for idx in range(len(processed_messages) - 1, -1, -1):
-            msg = processed_messages[idx]
-            if msg.get("role") == "tool":
-                tool_prompt = msg.get("content", "")
-                tool_call_id = msg.get("tool_call_id", "unknown")
-                last_tool_idx = idx
-                logger.info(
-                    f"🔧 [{request_id}] Tool prompt detectado | "
-                    f"Tool call ID: {tool_call_id} | "
-                    f"Índice: {idx} | "
-                    f"Longitud: {len(tool_prompt)} chars"
-                )
-                break
-
         # Extraer user prompt (último mensaje que NO sea tool)
         user_prompt = ""
         type_prompt = ""  # ← INICIALIZAR AQUÍ para evitar UnboundLocalError
-        last_user_idx = -1
-        
+
         # Buscar el último mensaje de usuario (ignorando mensajes tool)
         for idx in range(len(processed_messages) - 1, -1, -1):
             msg = processed_messages[idx]
             if msg.get("role") != "tool":
                 user_prompt = msg.get("content", "")
                 type_prompt = msg.get("type", "")
-                last_user_idx = idx
                 logger.info(
                     f"📝 [{request_id}] User prompt detectado | "
                     f"Índice: {idx} | "
@@ -405,14 +386,14 @@ class SAILLM(CustomLLM):
             role = msg.get("role")
             content = msg.get("content", "")
             
-            # Los mensajes tool que NO son el último se agregan al historial como user
+            # Los mensajes tool que NO son el último se agregan al historial como tool
             if role == "tool":
                 tc_id = msg.get("tool_call_id")
                 tool_content = f"[Tool Response - ID: {tc_id}]\n{content}"
                 
                 chat_messages.append({
                     "content": tool_content,
-                    "role": "user",
+                    "role": "tool",
                     "id": int(time.time() * 1000) + idx
                 })
                 
@@ -432,7 +413,7 @@ class SAILLM(CustomLLM):
         # Validar tamaño del contexto
         self._check_context_size(total_chars, request_id)
 
-        return system_prompt, user_prompt, tool_prompt, tool_call_id, chat_messages, type_prompt
+        return system_prompt, user_prompt, tool_call_id, chat_messages, type_prompt
 
     def _normalize_tool_calls(self, tool_calls, request_id: str) -> Optional[list]:
         if not tool_calls:
@@ -632,12 +613,11 @@ class SAILLM(CustomLLM):
         if has_tools:
             print(f"[{request_id}] [TOOLS] completion(): tools recibidas count={len(tools)}")
 
-        system, user_prompt, tool_prompt, tool_call_id, chat_messages, type_prompt = self._prepare_messages(messages, request_id)
+        system, user_prompt, tool_call_id, chat_messages, type_prompt = self._prepare_messages(messages, request_id)
 
         response_text, finish_reason, usage_data = self._call_sai(
             system,
             user_prompt,
-            tool_prompt,
             tool_call_id,
             chat_messages,
             request_id,
@@ -739,7 +719,7 @@ class SAILLM(CustomLLM):
         has_tools = bool(tools)  # Guardar si hay tools en la entrada
         logger.info(f"🧪 [{request_id}] [TOOLS] acompletion(): tools_present={has_tools} tools_type={type(tools).__name__ if tools else 'None'}")
 
-        system, user_prompt, tool_prompt, tool_call_id, chat_messages, type_prompt = self._prepare_messages(messages, request_id)
+        system, user_prompt, tool_call_id, chat_messages, type_prompt = self._prepare_messages(messages, request_id)
 
         loop = asyncio.get_running_loop()
 
@@ -758,7 +738,6 @@ class SAILLM(CustomLLM):
             call_sai_with_params,
             system,
             user_prompt,
-            tool_prompt,
             tool_call_id,
             chat_messages,
             request_id
@@ -1367,7 +1346,7 @@ class SAILLM(CustomLLM):
         return None, None
 
     # ---------------- Llamada privada a SAI (refactorizada) ----------------
-    def _call_sai(self, system: str, user: str, tool: str, tool_call_id: Optional[str], 
+    def _call_sai(self, system: str, user: str, tool_call_id: Optional[str],
                   chat_messages: list, request_id: str, type: str, api: str,
                   user_api_key: Optional[str] = None, model: Optional[str] = None, 
                   tools: Optional = None) -> tuple[str, str, dict]:
@@ -1388,7 +1367,6 @@ class SAILLM(CustomLLM):
             "inputs": {
                 "system": system,
                 "user": user,
-                "tool": tool if tool else None,  # Agregar tool message
                 "tools": None,  # tools definitions (se llenará después)
                 "type": type,
                 "api": api
@@ -1419,16 +1397,6 @@ class SAILLM(CustomLLM):
 
         data["inputs"]["tools"] = tools_json_str
 
-        # Logging de tool message si existe
-        if tool:
-            logger.info(
-                f"🔧 [{request_id}] [TOOL] Tool message incluido en inputs.tool | "
-                f"Tool call ID: {tool_call_id} | "
-                f"Longitud: {len(tool)} chars"
-            )
-            if VERBOSE_LOGGING:
-                logger.debug(f"[{request_id}] [TOOL] inputs.tool preview={tool[:180]!r}")
-
         if tools_json_str and VERBOSE_LOGGING:
             logger.debug(f"[{request_id}] [TOOLS] inputs.tools preview={tools_json_str[:180]!r}")
 
@@ -1441,7 +1409,6 @@ class SAILLM(CustomLLM):
                 f"🐍 [SERVER → SAI] [{request_id}] Preparando request | "
                 f"System: {len(system)} chars | "
                 f"User: {len(user)} chars | "
-                f"Tool: {len(tool) if tool else 0} chars | "
                 f"Historial: {len(chat_messages)} mensajes | "
                 f"Template: {SAI_TEMPLATE_ID} | "
                 f"Auth: {auth_type}"
