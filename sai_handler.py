@@ -800,6 +800,7 @@ class SAILLM(CustomLLM):
 
         # Tools (si vienen desde gateway/converter)
         tools = kwargs.get("tools")
+        api = kwargs["api"]
         # Omitir si es lista vacía
         if tools is not None and isinstance(tools, list) and len(tools) == 0:
             tools = None
@@ -828,9 +829,10 @@ class SAILLM(CustomLLM):
             chat_messages,
             request_id,
             type_prompt,
+            api,
             user_api_key=user_api_key,
             model=kwargs.get('model'),
-            tools=tools,
+            tools=tools
         )
 
         # SOLO extraer tool_calls si se enviaron tools en la entrada
@@ -934,7 +936,8 @@ class SAILLM(CustomLLM):
             user_api_key=user_api_key, 
             model=model, 
             tools=tools,
-            type=type_prompt
+            type=type_prompt,
+            api=kwargs["api"]
         )
 
         response_text, finish_reason, usage_data = await loop.run_in_executor(
@@ -1552,7 +1555,7 @@ class SAILLM(CustomLLM):
 
     # ---------------- Llamada privada a SAI (refactorizada) ----------------
     def _call_sai(self, system: str, user: str, tool: str, tool_call_id: Optional[str], 
-                  chat_messages: list, request_id: str, type: str,
+                  chat_messages: list, request_id: str, type: str, api: str,
                   user_api_key: Optional[str] = None, model: Optional[str] = None, 
                   tools: Optional = None) -> tuple[str, str, dict]:
         # Construir URL base
@@ -1574,7 +1577,8 @@ class SAILLM(CustomLLM):
                 "user": user,
                 "tool": tool if tool else None,  # Agregar tool message
                 "tools": None,  # tools definitions (se llenará después)
-                "type": type
+                "type": type,
+                "api": api
             }
         }
         
