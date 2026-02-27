@@ -426,12 +426,31 @@ class SAILLM(CustomLLM):
             if not isinstance(tc, dict):
                 continue
 
-            # A) Estilo OpenAI-ish
+            # A) Estilo OpenAI-ish (Chat Completions): {"type":"function","function":{"name":...,"arguments":"{...}"}}
             if tc.get("type") == "function" and isinstance(tc.get("function"), dict):
                 fn = tc.get("function") or {}
                 name = fn.get("name")
                 arguments = fn.get("arguments", "{}")
-            # B) Estilo compacto
+
+            # A2) Estilo "function_call": {"type":"function_call","function":{"name":...,"arguments":{...}}}
+            # (ej.: {"cmd":"ls -la"} como dict)
+            elif tc.get("type") == "function_call" and isinstance(tc.get("function"), dict):
+                fn = tc.get("function") or {}
+                name = fn.get("name")
+                arguments = fn.get("arguments", "{}")
+
+            # 🆕 A3) Estilo custom_tool_call con function wrapper: {"type":"custom_tool_call","function":{"name":...,"arguments":"..."}}
+            elif tc.get("type") == "custom_tool_call" and isinstance(tc.get("function"), dict):
+                fn = tc.get("function") or {}
+                name = fn.get("name")
+                arguments = fn.get("arguments", "")
+                logger.info(
+                    f"🔧 [{request_id}] [TOOLS] custom_tool_call con function wrapper detectado | "
+                    f"Name: {name} | "
+                    f"Arguments length: {len(arguments) if isinstance(arguments, str) else 'N/A'}"
+                )
+
+            # B) Estilo compacto: {"name":...,"arguments":...}
             else:
                 name = tc.get("name")
                 arguments = tc.get("arguments", "{}")
@@ -439,12 +458,26 @@ class SAILLM(CustomLLM):
             if not name:
                 continue
 
+            # Normalizar argumentos a string JSON si vienen como dict/list/etc.
+            if not isinstance(arguments, str):
+                arguments = json.dumps(arguments, ensure_ascii=False)
+
+            # Normalizar type: "function_call" -> "function" (formato esperado aguas abajo)
+            tc_type = tc.get("type")
+            if tc_type == "custom":
+                tc_type = "custom_tool_call"
+            elif tc_type == "function_call":
+                tc_type = "function_call"
+            # 🆕 Mantener "custom_tool_call" tal cual
+            elif tc_type == "custom_tool_call":
+                tc_type = "custom_tool_call"
+
             normalized.append({
                 "id": tc.get("id", f"call_{request_id}_{i}"),
-                "type": "function",
+                "type": tc_type,
                 "function": {
                     "name": name,
-                    "arguments": arguments if isinstance(arguments, str) else json.dumps(arguments, ensure_ascii=False)
+                    "arguments": arguments
                 }
             })
         return normalized or None
@@ -514,7 +547,7 @@ class SAILLM(CustomLLM):
                     if tool_calls:
                         # Limpiar el texto removiendo el bloque markdown completo
                         cleaned = trimmed[:markdown_start].rstrip()
-                        
+
                         after_tail = cleaned[-500:] if len(cleaned) > 500 else cleaned
                         logger.info(
                             f"🧪 [{request_id}] [TOOLS] AFTER extracted (from markdown) | "
@@ -523,7 +556,7 @@ class SAILLM(CustomLLM):
                             f"markdown_removed_len={markdown_end - markdown_start} | "
                             f"cleaned_tail_preview={after_tail!r}"
                         )
-                        
+
                         return tool_calls, cleaned
             except json.JSONDecodeError as e:
                 logger.warning(
@@ -552,6 +585,12 @@ class SAILLM(CustomLLM):
                 )
 
                 return tool_calls, cleaned
+            else:
+                # NUEVO: Log de diagnóstico cuando el marcador existe pero falla el parsing
+                logger.warning(
+                    f"⚠️ [{request_id}] [TOOLS] Marcador '{{\"tool_calls\"' encontrado en pos {marker_idx} pero parsing falló | "
+                    f"Snippet: {trimmed[marker_idx:marker_idx+100]!r}"
+                )
 
         # 2) Fallback: escanear todos los '{' hacia atrás (evita caer en '{' dentro de strings)
         brace_positions = [i for i, ch in enumerate(trimmed) if ch == "{"]
