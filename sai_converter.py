@@ -87,7 +87,7 @@ class OpenAiSAIConverter:
                             "role": role,
                             "content": text_content
                         })
-                elif input_msg.get("type") == "function_call_output":
+                elif input_msg.get("type") == "function_call_output" or input_msg.get("type") == "custom_tool_call_output":
                     role = "user"
                     output = input_msg.get("output")
 
