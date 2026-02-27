@@ -196,6 +196,61 @@ class ResponsesHandler:
         # Generar stream de eventos SSE
         async def event_generator() -> AsyncIterator[str]:
             try:
+                # 🔧 Enriquecer tools: agregar apply_patch dentro de kwargs["tools"]
+                # (sin pisar los tools existentes y evitando duplicados)
+                apply_patch_tool = {
+                    "type": "custom",
+                    "name": "apply_patch",
+                    "description": "Use the `apply_patch` tool to edit files. This is a FREEFORM tool, so do not wrap the patch in JSON.",
+                    "format": {
+                        "type": "grammar",
+                        "syntax": "lark",
+                        "definition": (
+                            "start: begin_patch hunk+ end_patch\n"
+                            "begin_patch: \"*** Begin Patch\" LF\n"
+                            "end_patch: \"*** End Patch\" LF?\n"
+                            "\n"
+                            "hunk: add_hunk | delete_hunk | update_hunk\n"
+                            "add_hunk: \"*** Add File: \" filename LF add_line+\n"
+                            "delete_hunk: \"*** Delete File: \" filename LF\n"
+                            "update_hunk: \"*** Update File: \" filename LF change_move? change?\n"
+                            "\n"
+                            "filename: /(.+)/\n"
+                            "add_line: \"+\" /(.*)/ LF -> line\n"
+                            "\n"
+                            "change_move: \"*** Move to: \" filename LF\n"
+                            "change: (change_context | change_line)+ eof_line?\n"
+                            "change_context: (\"@@\" | \"@@ \" /(.+)/) LF\n"
+                            "change_line: (\"+\" | \"-\" | \" \") /(.*)/ LF\n"
+                            "eof_line: \"*** End of File\" LF\n"
+                            "\n"
+                            "%import common.LF\n"
+                        )
+                    }
+                }
+
+                tools = kwargs.get("tools")
+                if tools is None:
+                    tools = []
+                    kwargs["tools"] = tools
+                elif not isinstance(tools, list):
+                    logger.warning(
+                        f"⚠️ [{request_id}] kwargs['tools'] no es list (es {type(tools).__name__}). Normalizando a lista."
+                    )
+                    tools = [tools]
+                    kwargs["tools"] = tools
+
+                existing_tool_names = set()
+                for t in tools:
+                    if isinstance(t, dict):
+                        name = t.get("name")
+                        if name:
+                            existing_tool_names.add(name)
+
+                if "apply_patch" not in existing_tool_names:
+                    tools.append(apply_patch_tool)
+                    logger.info(f"🧩 [{request_id}] Tool 'apply_patch' agregado a kwargs['tools'] (total={len(tools)})")
+
                 # 🔢 Inicializar contador de secuencia
                 sequence_number = 0
 
@@ -209,7 +264,7 @@ class ResponsesHandler:
                     # Timestamp de creación
                     created_at = int(time.time())
                     fc_item_id = uuid.uuid4().hex[:50]
-                    call_item_id = uuid.uuid4().hex[:24]
+                    call_item_id = request_id
                     response_id = f"resp_{uuid.uuid4().hex[:50]}"
                     # Variables para function_call streaming
                     function_call_emitted = False
@@ -220,6 +275,10 @@ class ResponsesHandler:
                     finish_reason = "end_turn"
 
                     function_arguments_buffer = ""
+                    # 🆕 Variables para custom_tool_call
+                    is_custom_tool = False
+                    custom_tool_input_buffer = ""
+                    item_type = None
 
                     async for chunk in stream_generator:
                         chunk_count += 1
@@ -285,12 +344,11 @@ class ResponsesHandler:
                                 yield "event: response.output_item.done\n"
                                 yield f"data: {json.dumps(response_output_item_done)}\n\n"
 
-                            if tool_use:
                                 response_output_item_added = event_builder.build_response_output_item_added_event(
                                     item_id=f"fc_{fc_item_id}",
-                                    item_type="function_call",
+                                    item_type=tool_use[0].get("type"),
                                     call_id=f"call_{call_item_id}",
-                                    name="exec_command",
+                                    name=tool_use[0].get("function").get("name"),
                                     sequence_number=sequence_number
                                 )
                                 sequence_number += 1
@@ -326,6 +384,9 @@ class ResponsesHandler:
                                 function_name = tc.get("function", {}).get("name")
                                 function_arguments_raw = tc.get("function", {}).get("arguments", "{}")
                                 
+                                # 🆕 Detectar si es un custom tool (apply_patch u otros con formato especial)
+                                is_custom_tool = function_name == "apply_patch"
+                                
                                 # 🔧 FIX CRÍTICO: Convertir dict a JSON string si es necesario
                                 if isinstance(function_arguments_raw, dict):
                                     function_arguments = json.dumps(function_arguments_raw, ensure_ascii=False)
@@ -338,7 +399,7 @@ class ResponsesHandler:
                                     function_arguments = function_arguments_raw
 
                                 logger.info(
-                                    f"🔧 [{request_id}] [FUNCTION_CALL] Detectado function_call único | "
+                                    f"🔧 [{request_id}] [{'CUSTOM_TOOL' if is_custom_tool else 'FUNCTION_CALL'}] Detectado tool único | "
                                     f"Name: {function_name} | "
                                     f"Arguments length: {len(function_arguments)}"
                                 )
@@ -361,26 +422,51 @@ class ResponsesHandler:
                                     arg_chunk = function_arguments[i:i + chunk_size]
                                     function_arguments_buffer += arg_chunk
 
-                                    response_function_call_arguments_delta = event_builder.build_response_function_call_arguments_delta_event(
-                                        item_id=output_item_id,
-                                        call_id=tc.get("id", f"call_{request_id}"),
-                                        delta=arg_chunk,
-                                        sequence_number=sequence_number
-                                    )
-                                    sequence_number += 1
-                                    yield "event: response.function_call.arguments.delta\n"
-                                    yield f"data: {json.dumps(response_function_call_arguments_delta)}\n\n"
+                                    # 🆕 Usar builder apropiado según el tipo de tool
+                                    if is_custom_tool:
+                                        custom_tool_input_buffer += arg_chunk
+                                        response_delta = event_builder.build_response_custom_tool_call_input_delta_event(
+                                            item_id=f"fc_{fc_item_id}",
+                                            delta=arg_chunk,
+                                            output_index=1,
+                                            sequence_number=sequence_number
+                                        )
+                                        sequence_number += 1
+                                        yield "event: response.custom_tool_call_input.delta\n"
+                                        yield f"data: {json.dumps(response_delta)}\n\n"
+                                    else:
+                                        response_function_call_arguments_delta = event_builder.build_response_function_call_arguments_delta_event(
+                                            item_id=output_item_id,
+                                            call_id=tc.get("id", f"call_{request_id}"),
+                                            delta=arg_chunk,
+                                            sequence_number=sequence_number
+                                        )
+                                        sequence_number += 1
+                                        yield "event: response.function_call.arguments.delta\n"
+                                        yield f"data: {json.dumps(response_function_call_arguments_delta)}\n\n"
 
+                                # 🆕 Emitir evento done apropiado según el tipo de tool
                                 if tool_use:
-                                    response_function_call_arguments_done = event_builder.build_response_function_call_arguments_done_event(
-                                        arguments=function_arguments,
-                                        item_id=f"fc_{fc_item_id}",
-                                        output_index=1,
-                                        sequence_number=sequence_number
-                                    )
-                                    sequence_number += 1
-                                    yield "event: response.function_call_arguments.done\n"
-                                    yield f"data: {json.dumps(response_function_call_arguments_done)}\n\n"
+                                    if is_custom_tool:
+                                        response_custom_input_done = event_builder.build_response_custom_tool_call_input_done_event(
+                                            item_id=f"fc_{fc_item_id}",
+                                            input_text=custom_tool_input_buffer,
+                                            output_index=1,
+                                            sequence_number=sequence_number
+                                        )
+                                        sequence_number += 1
+                                        yield "event: response.custom_tool_call_input.done\n"
+                                        yield f"data: {json.dumps(response_custom_input_done)}\n\n"
+                                    else:
+                                        response_function_call_arguments_done = event_builder.build_response_function_call_arguments_done_event(
+                                            arguments=function_arguments,
+                                            item_id=f"fc_{fc_item_id}",
+                                            output_index=1,
+                                            sequence_number=sequence_number
+                                        )
+                                        sequence_number += 1
+                                        yield "event: response.function_call_arguments.done\n"
+                                        yield f"data: {json.dumps(response_function_call_arguments_done)}\n\n"
                                 else:
                                     # Emitir evento function_call.completed
                                     response_function_call_completed = event_builder.build_response_function_call_completed_event(
@@ -508,14 +594,27 @@ class ResponsesHandler:
 
                             # 🔥 FORMATO CODEX CLI: OutputTextDelta
                             if tool_use:
-                                response_function_call_arguments_delta = event_builder.build_response_function_call_arguments_delta_event(
-                                    item_id=f"fc_{fc_item_id}",
-                                    delta=chunk_text,
-                                    sequence_number=sequence_number
-                                )
-                                sequence_number += 1
-                                yield f"event: response.function_call_arguments.delta\n"
-                                yield f"data: {json.dumps(response_function_call_arguments_delta)}\n\n"
+                                # 🆕 Usar builder apropiado según el tipo de tool
+                                if is_custom_tool:
+                                    custom_tool_input_buffer += chunk_text
+                                    response_delta = event_builder.build_response_custom_tool_call_input_delta_event(
+                                        item_id=f"fc_{fc_item_id}",
+                                        delta=chunk_text,
+                                        output_index=1,
+                                        sequence_number=sequence_number
+                                    )
+                                    sequence_number += 1
+                                    yield "event: response.custom_tool_call_input.delta\n"
+                                    yield f"data: {json.dumps(response_delta)}\n\n"
+                                else:
+                                    response_function_call_arguments_delta = event_builder.build_response_function_call_arguments_delta_event(
+                                        item_id=f"fc_{fc_item_id}",
+                                        delta=chunk_text,
+                                        sequence_number=sequence_number
+                                    )
+                                    sequence_number += 1
+                                    yield f"event: response.function_call_arguments.delta\n"
+                                    yield f"data: {json.dumps(response_function_call_arguments_delta)}\n\n"
                             else:
                                 response_output_text_delta = event_builder.build_response_output_text_delta_event(
                                     item_id=output_item_id,
@@ -576,15 +675,27 @@ class ResponsesHandler:
                 # 🔥 EVENTO CANÓNICO: response.output_text.done (solo si hay texto)
                 if total_text:
                     if tool_use:
-                        response_function_call_arguments_done = event_builder.build_response_function_call_arguments_done_event(
-                            arguments=total_text,
-                            item_id=f"fc_{fc_item_id}",
-                            output_index=1,
-                            sequence_number=sequence_number
-                        )
-                        sequence_number += 1
-                        yield "event: response.function_call_arguments.done\n"
-                        yield f"data: {json.dumps(response_function_call_arguments_done)}\n\n"
+                        # 🆕 Usar builder apropiado según el tipo de tool
+                        if is_custom_tool:
+                            response_custom_input_done = event_builder.build_response_custom_tool_call_input_done_event(
+                                item_id=f"fc_{fc_item_id}",
+                                input_text=custom_tool_input_buffer,
+                                output_index=1,
+                                sequence_number=sequence_number
+                            )
+                            sequence_number += 1
+                            yield "event: response.custom_tool_call_input.done\n"
+                            yield f"data: {json.dumps(response_custom_input_done)}\n\n"
+                        else:
+                            response_function_call_arguments_done = event_builder.build_response_function_call_arguments_done_event(
+                                arguments=total_text,
+                                item_id=f"fc_{fc_item_id}",
+                                output_index=1,
+                                sequence_number=sequence_number
+                            )
+                            sequence_number += 1
+                            yield "event: response.function_call_arguments.done\n"
+                            yield f"data: {json.dumps(response_function_call_arguments_done)}\n\n"
                     else:
                         response_output_text_done = event_builder.build_response_output_text_done_event(
                             item_id=output_item_id,
@@ -608,18 +719,33 @@ class ResponsesHandler:
 
                 if tool_use:
                     # 🔥 EVENTO: output_item.done
-                    response_output_item_done = event_builder.build_response_output_item_done_event(
-                        item_id=f"fc_{fc_item_id}",
-                        item_type="function_call",
-                        output_index=0,
-                        sequence_number=sequence_number,
-                        function_call_data={
-                            "arguments": function_arguments_buffer,
-                            "call_id": f"call_{call_item_id}",
-                            "name": "exec_command",
-                            "status": "completed"
-                        }
-                    )
+                    # 🆕 Determinar si usar function_call_data o custom_tool_call_data según el nombre del tool
+                    if function_name == "apply_patch":
+                        response_output_item_done = event_builder.build_response_output_item_done_event(
+                            item_id=f"fc_{fc_item_id}",
+                            item_type=tool_use[0].get("type"),
+                            output_index=0,
+                            sequence_number=sequence_number,
+                            custom_tool_call_data={
+                                "input": custom_tool_input_buffer,
+                                "call_id": f"call_{call_item_id}",
+                                "name": function_name,
+                                "status": "completed"
+                            }
+                        )
+                    else:
+                        response_output_item_done = event_builder.build_response_output_item_done_event(
+                            item_id=f"fc_{fc_item_id}",
+                            item_type=tool_use[0].get("type"),
+                            output_index=0,
+                            sequence_number=sequence_number,
+                            function_call_data={
+                                "arguments": function_arguments_buffer,
+                                "call_id": f"call_{call_item_id}",
+                                "name": function_name,
+                                "status": "completed"
+                            }
+                        )
                     sequence_number += 1
                     yield "event: response.output_item.done\n"
                     yield f"data: {json.dumps(response_output_item_done)}\n\n"
@@ -628,15 +754,25 @@ class ResponsesHandler:
                     # Algunos clientes esperan este evento antes del evento final response.done.
                     completed_at = int(time.time())
 
-                    # Construir output según si hay tool_calls o texto
-                    output = [{
-                        "type": "function_call",
-                        "id": f"fc_{fc_item_id}",
-                        "call_id": f"call_{call_item_id}",
-                        "name": function_name,
-                        "arguments": function_arguments_buffer,
-                        "status": "completed"
-                    }]
+                    # 🆕 Construir output según si es apply_patch o function_call estándar
+                    if function_name == "apply_patch":
+                        output = [{
+                            "type": item_type,
+                            "id": f"fc_{fc_item_id}",
+                            "call_id": f"call_{call_item_id}",
+                            "name": function_name,
+                            "input": custom_tool_input_buffer,
+                            "status": "completed"
+                        }]
+                    else:
+                        output = [{
+                            "type": item_type,
+                            "id": f"fc_{fc_item_id}",
+                            "call_id": f"call_{call_item_id}",
+                            "name": function_name,
+                            "arguments": function_arguments_buffer,
+                            "status": "completed"
+                        }]
 
                     # Formato para function_call
 
@@ -688,7 +824,7 @@ class ResponsesHandler:
                     if function_call_emitted and function_name:
                         # Formato para function_call
                         output.append({
-                            "type": "function_call",
+                            "type": item_type,
                             "id": f"fc_{request_id}",
                             "call_id": f"call_{request_id}",
                             "name": function_name,
