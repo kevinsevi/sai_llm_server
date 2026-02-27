@@ -2,7 +2,7 @@ version: '3.8'
 
 services:
   sai_llm:
-    image: cobistopaz/sai_llm_server
+    image: cobistopaz/sai_llm_server:2.0.0
     ports:
       - "4000:4000"
     environment:
