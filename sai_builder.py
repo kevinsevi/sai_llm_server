@@ -157,6 +157,7 @@ class ResponseEventBuilder:
             has_content: bool = True,
             call_id: str = None,
             name: str = None,
+            output_index: int = None,
             sequence_number: int = 2
     ) -> dict:
         """
@@ -164,15 +165,22 @@ class ResponseEventBuilder:
 
         Args:
             item_id: ID único del item de salida
-            item_type: Tipo de item ("message", "reasoning", "function_call")
+            item_type: Tipo de item ("message", "reasoning", "function_call", "custom_tool_call")
             has_content: Si el item debe incluir contenido inicial vacío (default: True)
-            call_id: ID de la llamada para function_call (opcional)
-            name: Nombre de la función para function_call (opcional)
+            call_id: ID de la llamada para function_call o custom_tool_call (opcional)
+            name: Nombre de la función/tool para function_call o custom_tool_call (opcional)
+            output_index: Índice del output en la respuesta (opcional, usado con custom_tool_call)
             sequence_number: Número de secuencia del evento (default: 2)
 
         Returns:
             dict: Evento response.output_item.added en formato OpenAI Responses API
         """
+        # Estructura base del evento
+        event = {
+            "type": "response.output_item.added"
+        }
+
+        # Construir el item base
         item = {
             "id": item_id,
             "type": item_type
@@ -198,11 +206,25 @@ class ResponseEventBuilder:
                 "name": name or ""
             })
 
-        return {
-            "type": "response.output_item.added",
-            "item": item,
-            "sequence_number": sequence_number
-        }
+        # Para custom_tool_call, agregar campos específicos
+        elif item_type == "custom_tool_call":
+            item.update({
+                "status": "in_progress",
+                "call_id": call_id or "",
+                "input": "",
+                "name": name or ""
+            })
+
+        # Agregar el item al evento
+        event["item"] = item
+
+        event["sequence_number"] = sequence_number
+
+        # Agregar output_index si se proporciona (típicamente para custom_tool_call)
+        if output_index is not None:
+            event["output_index"] = output_index
+
+        return event
 
     @staticmethod
     def build_response_output_item_done_event(
@@ -211,18 +233,20 @@ class ResponseEventBuilder:
             text: str = "",
             output_index: int = 0,
             sequence_number: int = 7,
-            function_call_data: dict = None
+            function_call_data: dict = None,
+            custom_tool_call_data: dict = None
     ) -> dict:
         """
         Construye el evento response.output_item.done para streaming SSE.
 
         Args:
             item_id: ID único del item de salida
-            item_type: Tipo de item ("message", "reasoning", "function_call")
+            item_type: Tipo de item ("message", "reasoning", "function_call", "custom_tool_call")
             text: Texto completo del mensaje (para message/reasoning)
             output_index: Índice del output en la respuesta (default: 0)
             sequence_number: Número de secuencia del evento (default: 7)
             function_call_data: Datos del function_call si aplica (dict con keys: call_id, name, arguments, status)
+            custom_tool_call_data: Datos del custom_tool_call si aplica (dict con keys: call_id, name, input, status)
 
         Returns:
             dict: Evento response.output_item.done en formato OpenAI Responses API
@@ -255,17 +279,41 @@ class ResponseEventBuilder:
             # Soporte completo para function_call
             if function_call_data:
                 item.update({
-                    "arguments": function_call_data.get("arguments", "{}"),
-                    "call_id": function_call_data.get("call_id", ""),
-                    "name": function_call_data.get("name", ""),
+                    "arguments": function_call_data.get("arguments", "a"),
+                    "call_id": function_call_data.get("call_id", "a"),
+                    "name": function_call_data.get("name", "a"),
                     "status": function_call_data.get("status", "completed")
+                })
+            elif custom_tool_call_data:
+                item.update({
+                    "arguments": custom_tool_call_data.get("arguments", "b"),
+                    "call_id": custom_tool_call_data.get("call_id", "b"),
+                    "name": custom_tool_call_data.get("name", "b"),
+                    "status": custom_tool_call_data.get("status", "completed")
                 })
             else:
                 # Valores por defecto si no se proporciona function_call_data
                 item.update({
-                    "arguments": "{}",
-                    "call_id": "",
-                    "name": "",
+                    "arguments": "c",
+                    "call_id": "c",
+                    "name": "c",
+                    "status": "completed"
+                })
+        elif item_type == "custom_tool_call":
+            # Soporte completo para custom_tool_call
+            if custom_tool_call_data:
+                item.update({
+                    "call_id": custom_tool_call_data.get("call_id", "d"),
+                    "input": custom_tool_call_data.get("input", "d"),
+                    "name": custom_tool_call_data.get("name", "d"),
+                    "status": custom_tool_call_data.get("status", "completed")
+                })
+            else:
+                # Valores por defecto si no se proporciona custom_tool_call_data
+                item.update({
+                    "call_id": "e",
+                    "input": "e",
+                    "name": "e",
                     "status": "completed"
                 })
 
@@ -367,6 +415,42 @@ class ResponseEventBuilder:
             event["call_id"] = call_id
 
         return event
+
+    @staticmethod
+    def build_response_custom_tool_call_input_delta_event(
+            item_id: str,
+            delta: str,
+            output_index: int = 1,
+            sequence_number: int = 5,
+            obfuscation: str = None
+    ) -> dict:
+        event = {
+            "type": "response.custom_tool_call_input.delta",
+            "item_id": item_id,
+            "delta": delta,
+            "output_index": output_index,
+            "sequence_number": sequence_number
+        }
+
+        if obfuscation is not None:
+            event["obfuscation"] = obfuscation
+
+        return event
+
+    @staticmethod
+    def build_response_custom_tool_call_input_done_event(
+            item_id: str,
+            input_text: str,
+            output_index: int = 1,
+            sequence_number: int = 26
+    ) -> dict:
+        return {
+            "type": "response.custom_tool_call_input.done",
+            "item_id": item_id,
+            "input": input_text,
+            "output_index": output_index,
+            "sequence_number": sequence_number
+        }
 
     @staticmethod
     def build_response_output_text_done_event(
