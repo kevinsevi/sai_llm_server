@@ -5,12 +5,42 @@ import json
 
 from sai_handler import sai_llm, logger
 from starlette.responses import Response, StreamingResponse
+from sai_system_prompt import merge_system_prompts_for_chat_completions
 
 class ChatCompletionsHandler:
     """Handler para endpoints de chat completions en formato OpenAI."""
 
+    def _process_messages(self, messages: list) -> list:
+        """
+        Procesa mensajes y concatena system prompt adicional.
+        
+        Args:
+            messages: Lista de mensajes originales.
+        
+        Returns:
+            Lista de mensajes procesados con system prompt combinado.
+        """
+        processed = []
+        
+        for msg in messages:
+            if msg.get("role") == "system":
+                # Concatenar system prompt adicional
+                original_content = msg.get("content", "")
+                merged_content = merge_system_prompts_for_chat_completions(original_content)
+                processed.append({
+                    "role": "system",
+                    "content": merged_content
+                })
+            else:
+                processed.append(msg)
+        
+        return processed
+
     async def chat_completions_non_streaming(self, request_id: str, messages: list, kwargs: dict, model: str):
         """Maneja requests de chat completions sin streaming."""
+        # Procesar mensajes con system prompt adicional
+        messages = self._process_messages(messages)
+        
         logger.info(f"🚀 [{request_id}] Llamando a sai_llm.acompletion()...")
         litellm_response = await sai_llm.acompletion(request_id, messages=messages, **kwargs)
 
@@ -126,6 +156,9 @@ class ChatCompletionsHandler:
 
     async def chat_completions_streaming(self, request_id: str, messages: list, kwargs: dict, model: str):
         """Maneja requests de chat completions con streaming."""
+        # Procesar mensajes con system prompt adicional
+        messages = self._process_messages(messages)
+        
         async def event_generator():
             try:
                 logger.info(f"🌊 [{request_id}] Iniciando streaming...")
