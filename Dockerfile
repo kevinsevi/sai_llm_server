@@ -28,6 +28,9 @@ RUN pip install --no-cache-dir \
 # Copiar el código (todas las clases sai_*.py)
 COPY sai_*.py ./
 
+# Copiar los archivos de system prompts
+COPY system_prompt_*.txt ./
+
 # (Opcional) si aún usas config.yaml para otra cosa, mantenlo; si no, puedes borrarlo
 COPY config.yaml ./
 
