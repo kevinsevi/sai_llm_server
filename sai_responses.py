@@ -8,12 +8,42 @@ from sai_handler import sai_llm, logger, VERBOSE_LOGGING
 from sai_builder import event_builder
 from starlette.responses import Response, StreamingResponse
 from typing import AsyncIterator
+from sai_system_prompt import merge_system_prompts_for_responses
 
 class ResponsesHandler:
     """Handler para el endpoint /v1/responses con soporte streaming y no streaming."""
 
+    def _process_messages(self, messages: list) -> list:
+        """
+        Procesa mensajes y concatena system prompt adicional.
+        
+        Args:
+            messages: Lista de mensajes originales.
+        
+        Returns:
+            Lista de mensajes procesados con system prompt combinado.
+        """
+        processed = []
+        
+        for msg in messages:
+            if msg.get("role") == "system":
+                # Concatenar system prompt adicional
+                original_content = msg.get("content", "")
+                merged_content = merge_system_prompts_for_responses(original_content)
+                processed.append({
+                    "role": "system",
+                    "content": merged_content
+                })
+            else:
+                processed.append(msg)
+        
+        return processed
+
     async def responses_non_streaming(self, request_id: str, output_item_id: str,
                                       messages: list, kwargs: dict, model: str):
+        # Procesar mensajes con system prompt adicional
+        messages = self._process_messages(messages)
+        
         logger.info(f"🚀 [{request_id}] Llamando a sai_llm.acompletion()...")
 
         # Timestamp de inicio
@@ -193,6 +223,9 @@ class ResponsesHandler:
 
     async def responses_streaming(self, request_id: str, output_item_id: str,
                                   messages: list, kwargs: dict, model: str, has_reasoning=False):
+        # Procesar mensajes con system prompt adicional
+        messages = self._process_messages(messages)
+        
         # Generar stream de eventos SSE
         async def event_generator() -> AsyncIterator[str]:
             try:
