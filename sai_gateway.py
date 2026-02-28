@@ -13,7 +13,7 @@ from sai_chat_completions import chat_completions_handler
 from sai_responses import responses_handler
 from sai_models import get_models_list, get_model_by_id
 
-app = FastAPI(title="OpenAI SAI Gateway", version="1.0.4")
+app = FastAPI(title="OpenAI SAI Gateway", version="2.0.0")
 
 def _normalize_bool(value) -> bool:
     if isinstance(value, bool):
@@ -395,15 +395,8 @@ async def model_detail_endpoint(model_id: str):
 async def root():
     return {
         "service": "OpenAI SAI Gateway",
-        "version": "1.0.4",
+        "version": "2.0.0",
         "description": "Gateway que expone SAI con APIs compatibles con OpenAI",
-        "changelog": {
-            "1.0.4": "Corregido evento final de 'response.completed' a 'response.done' según spec oficial",
-            "1.0.3": "Cierre inmediato de stream después de completed",
-            "1.0.2": "Intento de fix con keepalives",
-            "1.0.1": "Intento de fix con delay",
-            "1.0.0": "Release inicial"
-        },
         "endpoints": {
             "completions": {
                 "paths": ["/v1/completions", "/completions"],
@@ -468,7 +461,7 @@ async def health_check():
     return {
         "status": "healthy",
         "service": "openai-sai-gateway",
-        "version": "1.0.4"
+        "version": "2.0.0"
     }
 
 
@@ -477,7 +470,7 @@ if __name__ == "__main__":
     import sys
 
     print("\n" + "="*80)
-    print("🚀 OPENAI SAI GATEWAY v1.0.4")
+    print("🚀 OPENAI SAI GATEWAY v2.0.0")
     print("="*80)
     logger.info("📍 Endpoints disponibles:")
     logger.info("   - POST /v1/completions  (o /completions)")
@@ -493,7 +486,6 @@ if __name__ == "__main__":
     logger.info("   - GET /health")
     logger.info("")
     logger.info("💡 Todos los endpoints funcionan con o sin el prefijo /v1")
-    logger.info("🔧 FIX v1.0.4: Evento final correcto: response.done (no completed)")
     logger.info("🌐 Servidor iniciando en http://0.0.0.0:8000")
     logger.info("💡 Presiona Ctrl+C para detener")
     print("="*80 + "\n")
