@@ -1,5 +1,7 @@
 # sai_converter.py
 
+import json
+
 from sai_handler import logger
 from sai_extractor import text_extractor
 
@@ -95,6 +97,11 @@ class OpenAiSAIConverter:
                         "type": input_msg.get("type"),
                         "role": role,
                         "content": output
+                    })
+                elif input_msg.get("type") == "function_call":
+                    messages.append({
+                        "role": "assistant",
+                        "content": json.dumps(input_msg)
                     })
 
         # Preparar kwargs para LiteLLM
