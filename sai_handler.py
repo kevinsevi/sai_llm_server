@@ -493,15 +493,30 @@ class SAILLM(CustomLLM):
         if candidate[end:].strip():
             return None, None, None, None
 
-        if not (isinstance(obj, dict) and "tool_calls" in obj):
-            return None, None, None, None
+        # ✅ Caso 1 (existente): wrapper {"tool_calls": ...}
+        if isinstance(obj, dict) and "tool_calls" in obj:
+            tool_calls = self._normalize_tool_calls(obj.get("tool_calls"), request_id)
+            if not tool_calls:
+                return None, None, None, None
 
-        tool_calls = self._normalize_tool_calls(obj.get("tool_calls"), request_id)
-        if not tool_calls:
-            return None, None, None, None
+            json_raw = candidate[:end]
+            return tool_calls, start_idx, start_idx + end, json_raw
 
-        json_raw = candidate[:end]
-        return tool_calls, start_idx, start_idx + end, json_raw
+        # ✅ Caso 2 (nuevo): tool call "suelto" al final
+        # Ej: {"type":"function_call","name":"exec_command","arguments":{...}}
+        if isinstance(obj, dict) and (obj.get("name") or obj.get("function")):
+            tool_calls = self._normalize_tool_calls(obj, request_id)
+            if not tool_calls:
+                return None, None, None, None
+
+            json_raw = candidate[:end]
+            logger.info(
+                f"🧪 [{request_id}] [TOOLS] extractor: tool_call JSON suelto detectado al final | "
+                f"normalized_count={len(tool_calls)} | json_len={len(json_raw)}"
+            )
+            return tool_calls, start_idx, start_idx + end, json_raw
+
+        return None, None, None, None
 
     def _extract_tool_calls_from_plain_text_end(
             self,
@@ -527,27 +542,27 @@ class SAILLM(CustomLLM):
         import re
         markdown_json_pattern = r'```json\s*\n(.*?)\n```'
         markdown_match = re.search(markdown_json_pattern, trimmed, re.DOTALL)
-        
+
         if markdown_match:
             json_content = markdown_match.group(1).strip()
             markdown_start = markdown_match.start()
             markdown_end = markdown_match.end()
-            
+
             logger.info(
                 f"🧪 [{request_id}] [TOOLS] Markdown JSON block detectado | "
                 f"Start: {markdown_start} | End: {markdown_end} | "
                 f"JSON length: {len(json_content)} chars"
             )
-            
+
             # Intentar parsear el JSON extraído
             try:
                 obj = json.loads(json_content)
+
+                # ✅ Soportar wrapper {"tool_calls": ...}
                 if isinstance(obj, dict) and "tool_calls" in obj:
                     tool_calls = self._normalize_tool_calls(obj.get("tool_calls"), request_id)
                     if tool_calls:
-                        # Limpiar el texto removiendo el bloque markdown completo
                         cleaned = trimmed[:markdown_start].rstrip()
-
                         after_tail = cleaned[-500:] if len(cleaned) > 500 else cleaned
                         logger.info(
                             f"🧪 [{request_id}] [TOOLS] AFTER extracted (from markdown) | "
@@ -556,8 +571,23 @@ class SAILLM(CustomLLM):
                             f"markdown_removed_len={markdown_end - markdown_start} | "
                             f"cleaned_tail_preview={after_tail!r}"
                         )
-
                         return tool_calls, cleaned
+
+                # ✅ Soportar tool_call suelto en markdown
+                if isinstance(obj, dict) and (obj.get("name") or obj.get("function")):
+                    tool_calls = self._normalize_tool_calls(obj, request_id)
+                    if tool_calls:
+                        cleaned = trimmed[:markdown_start].rstrip()
+                        after_tail = cleaned[-500:] if len(cleaned) > 500 else cleaned
+                        logger.info(
+                            f"🧪 [{request_id}] [TOOLS] AFTER extracted (from markdown single tool_call) | "
+                            f"cleaned_len={len(cleaned)} | "
+                            f"tool_calls_count={len(tool_calls)} | "
+                            f"markdown_removed_len={markdown_end - markdown_start} | "
+                            f"cleaned_tail_preview={after_tail!r}"
+                        )
+                        return tool_calls, cleaned
+
             except json.JSONDecodeError as e:
                 logger.warning(
                     f"⚠️ [{request_id}] [TOOLS] Markdown JSON block inválido | "
