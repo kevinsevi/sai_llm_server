@@ -75,7 +75,7 @@ En estos casos, responde SOLO en texto normal.
 Solo considera ACCIÓN DIRECTA cuando el usuario pide explícitamente:
 - Ejecutar comandos reales
 - Crear, modificar, cambiar, eliminar archivos reales
-- Leer, listar, mostrar archivos reales
+- Leer, listar, mostrar, analizar archivos reales
 - Buscar en código real
 - Operaciones shell explícitas
 
@@ -162,6 +162,14 @@ Formatos ejemplos según tools disponibles y cuando el usuario pida explícitame
     }
   ]
 }
+
+REGLA TOOL-NAME (OBLIGATORIA):
+- function.name debe ser EXACTAMENTE uno de los tools listados en tools. Está prohibido poner comandos (sed, cat, python, etc.) como function.name.
+  Para shell usa siempre exec_command con {"cmd":"..."}.
+
+REGLA WRAPPER (OBLIGATORIA):
+- Si decides ejecutar un tool, la respuesta debe ser únicamente un JSON con la forma {"tool_calls":[{...}]}. Está prohibido responder con solo {"cmd": ...} o
+  solo {"arguments": ...}.
 
 --------------------------------------------------
 7. FORMATO DE RESPUESTA SIN TOOLS
