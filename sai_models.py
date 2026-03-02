@@ -17,6 +17,18 @@ AVAILABLE_MODELS = [
         }
     },
     {
+        "id": "claude-sonnet-4-6",
+        "object": "model",
+        "created": 1735689600,  # placeholder estable (UTC)
+        "owned_by": "stefanini",
+        "permission": [],
+        "root": "claude-sonnet-4-6",
+        "parent": None,
+        "metadata": {
+            "provider_model": "SAI/claude-sonnet-4-6"
+        }
+    },
+    {
         "id": "gpt-5.2-2025-12-11",
         "object": "model",
         "created": 1735689600,  # placeholder estable (UTC)
