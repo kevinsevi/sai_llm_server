@@ -71,7 +71,18 @@ class OpenAiSAIConverter:
                     role = input_msg.get("role")
                     content_items = input_msg.get("content", [])
 
-                    # Extraer texto de los items de contenido
+                    # 🔧 FIX: content puede ser string directamente
+                    if isinstance(content_items, str):
+                        if content_items:
+                            # Mapear "developer" a "system" para LiteLLM
+                            mapped_role = "system" if role == "developer" else role
+                            messages.append({
+                                "role": mapped_role,
+                                "content": content_items
+                            })
+                        continue
+
+                    # Extraer texto de los items de contenido (lista)
                     text_parts = []
                     for content_item in content_items:
                         # 🔧 FIX: Validar que content_item sea un diccionario
