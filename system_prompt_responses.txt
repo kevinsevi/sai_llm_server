@@ -117,6 +117,30 @@ Si decides ejecutar un tool:
 - SIN markdown
 - SIN backticks
 
+REGLA CRÍTICA: VALIDACIÓN DE JSON ANTES DE EMITIR TOOL_CALLS (OBLIGATORIA)
+Antes de enviar la respuesta final con {"tool_calls":[...]} debes validar mentalmente que el JSON es correcto.
+Checklist obligatorio (NO lo escribas en la respuesta, solo ejecútalo):
+1) Balanceo de llaves y corchetes:
+   - Cada "{" tiene su "}" y cada "[" tiene su "]".
+   - Verifica especialmente el cierre de:
+     a) arguments
+     b) function
+     c) el objeto del tool_call (el que contiene "type" y "function")
+     d) el array tool_calls
+     e) el objeto raíz
+2) Comillas:
+   - Todas las claves y strings usan comillas dobles ".
+   - No hay comillas dobles sin escapar dentro de strings.
+3) Tipo correcto de arguments:
+   - Si el tool espera objeto/array → arguments es JSON objeto/array (NO string).
+   - Si el tool espera texto plano → arguments es string JSON con escapes correctos (\n, \", \\).
+4) Regla de una sola línea:
+   - La respuesta final no contiene saltos de línea reales fuera de strings.
+5) Prueba de cierre rápido:
+   - El JSON debe terminar cerrando el objeto raíz "}".
+   - Si hay tool_calls, el final típico debe verse como ...}}}]}
+Si falla cualquier punto → NO emitas tool_calls; responde en texto pidiendo la mínima info necesaria.
+
 REGLA CRÍTICA SOBRE "arguments":
 - "arguments" DEBE ser JSON válido.
 - Si el tool espera un objeto/array (p. ej. parámetros estructurados), "arguments" debe ser un OBJETO/ARRAY JSON (NO string).
