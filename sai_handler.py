@@ -895,30 +895,24 @@ class SAILLM(CustomLLM):
         # Extraer texto y tool_calls de la respuesta
         text = None
         tool_calls = None
-    
+
         if hasattr(response, 'choices') and response.choices:
             choice = response.choices[0]
-        
+
             if hasattr(choice, 'message'):
-                # Extraer tool_calls si existen
                 if hasattr(choice.message, 'tool_calls') and choice.message.tool_calls:
                     tool_calls = choice.message.tool_calls
                     logger.info(
                         f"🔧 [{request_id}] [STREAMING] Response contiene tool_calls | "
                         f"Count: {len(tool_calls)}"
                     )
-                
-                # Extraer content (puede coexistir con tool_calls)
+
                 if hasattr(choice.message, 'content') and choice.message.content:
                     text = choice.message.content
-                    logger.info(
-                        f"choice.message.content: {bool(text)}"
-                    )
+                    logger.info(f"choice.message.content: {bool(text)}")
         elif hasattr(response, 'text') and response.text:
             text = response.text
-            logger.info(
-                f"response.text: {bool(text)}"
-            )
+            logger.info(f"response.text: {bool(text)}")
 
         # Validar que haya al menos texto o tool_calls
         if not text and not tool_calls:
@@ -933,15 +927,9 @@ class SAILLM(CustomLLM):
         usage_dict = response.usage.__dict__ if not isinstance(response.usage, dict) else response.usage
         finish_reason = response.choices[0].finish_reason
 
-        # Si hay tool_calls, emitir un chunk especial con tool_use
+        # Convertir tool_calls a formato serializable (si aplica)
+        tool_calls_list = None
         if tool_calls:
-            logger.info(
-                f"🔧 [{request_id}] [STREAMING] Emitiendo chunk con tool_calls | "
-                f"Count: {len(tool_calls)} | "
-                f"Tiene texto adicional: {bool(text)}"
-            )
-            
-            # Convertir tool_calls a formato serializable
             tool_calls_list = []
             for tc in tool_calls:
                 if hasattr(tc, '__dict__'):
@@ -956,41 +944,22 @@ class SAILLM(CustomLLM):
                 else:
                     tc_dict = tc
                 tool_calls_list.append(tc_dict)
-            
-            # Emitir chunk con tool_calls (sin texto)
-            yield GenericStreamingChunk(
-                text="",
-                index=0,
-                is_finished=not text,  # Solo es final si no hay texto adicional
-                finish_reason=finish_reason if not text else None,
-                tool_use=tool_calls_list,
-                usage=usage_dict
-            )
 
-        # Si hay texto, emitirlo en chunks (puede ser adicional a tool_calls)
-        if text:
-            logger.info(
-                f"📝 [{request_id}] [STREAMING] Emitiendo texto en chunks | "
-                f"Longitud: {len(text)} chars | "
-                f"Chunk size: {CHUNK_SIZE} | "
-                f"Tiene tool_calls previos: {bool(tool_calls)}"
-            )
-            
-            start_index = 1 if tool_calls else 0  # Ajustar índice si ya se emitió chunk de tool_calls
-            
-            for idx, start in enumerate(range(0, len(text), CHUNK_SIZE), start=start_index):
-                chunk_text = text[start:start + CHUNK_SIZE]
-                await asyncio.sleep(0.001)
-                is_final = start + CHUNK_SIZE >= len(text)
-                
-                yield GenericStreamingChunk(
-                    text=chunk_text,
-                    index=idx,
-                    is_finished=is_final,
-                    finish_reason=finish_reason if is_final else None,
-                    tool_use=None,
-                    usage=usage_dict if is_final else None
-                )
+        # ✅ Emitir UN ÚNICO chunk que contenga texto + tool_use (si existen)
+        final_text = text or ""
+        logger.info(
+            f"🧩 [{request_id}] [STREAMING] Emitiendo chunk único | "
+            f"text_len={len(final_text)} | tool_calls={len(tool_calls_list) if tool_calls_list else 0}"
+        )
+
+        yield GenericStreamingChunk(
+            text=final_text,
+            index=0,
+            is_finished=True,
+            finish_reason=finish_reason,
+            tool_use=tool_calls_list,
+            usage=usage_dict
+        )
 
     # ---------------- Métodos auxiliares para reducir complejidad ----------------
     def _determine_auth_method(self, user_api_key: Optional[str], request_id: str) -> tuple[Optional[str], Optional[str], str]:
