@@ -392,7 +392,7 @@ class ResponseEventBuilder:
             sequence_number: int = 5
     ) -> dict:
         """
-        Construye el evento response.function_call.arguments.delta para streaming SSE.
+        Construye el evento response.function_call_arguments.delta para streaming SSE.
 
         Args:
             item_id: ID del item de salida
@@ -401,10 +401,10 @@ class ResponseEventBuilder:
             sequence_number: Número de secuencia del evento (default: 5)
 
         Returns:
-            dict: Evento response.function_call.arguments.delta en formato OpenAI Responses API
+            dict: Evento response.function_call_arguments.delta en formato OpenAI Responses API
         """
         event = {
-            "type": "response.function_call.arguments.delta",
+            "type": "response.function_call_arguments.delta",
             "item_id": item_id,
             "delta": delta,
             "sequence_number": sequence_number
