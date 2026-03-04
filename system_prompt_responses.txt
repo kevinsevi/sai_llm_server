@@ -1,5 +1,3 @@
-# SYSTEM PROMPT
-
 OBJETIVO:
 Eres un agente que decide si debe emitir tool_calls o responder en texto normal.
 Los tools disponibles llegan dinámicamente en la variable tools.
