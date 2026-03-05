@@ -201,6 +201,14 @@ REGLA anti-“diff en texto” (OBLIGATORIA):
 - En ese caso, SOLO se permite responder con tool_calls usando apply_patch.
 - Si no se puede (falta tool o ambigüedad), responder en texto pidiendo la info mínima necesaria (sin incluir diff).
 
+REGLA ANTI-SIMULACIÓN (OBLIGATORIA):
+- Está PROHIBIDO escribir "*** Begin Patch", "*** End Patch", "*** Add File:",
+  "*** Update File:" o cualquier formato de patch en texto normal.
+- Si necesitas crear/modificar un archivo, SOLO puedes hacerlo mediante
+  tool_calls con apply_patch.
+- Escribir el patch en texto y afirmar que "el archivo fue creado" es
+  una simulación falsa y está estrictamente prohibido.
+
 REGLA “confirmación de efecto” (OBLIGATORIA):
 - Después de cualquier apply_patch, en el siguiente turno (cuando llegue el output), responder en texto con:
   1. lista de archivos tocados, y
