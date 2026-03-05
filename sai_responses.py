@@ -9,6 +9,12 @@ from sai_builder import event_builder
 from starlette.responses import Response, StreamingResponse
 from typing import AsyncIterator
 from sai_system_prompt import merge_system_prompts_for_responses
+from sai_exceptions import (
+    SAIAPIError,
+    SAIAuthenticationError,
+    SAIRateLimitError,
+    SAIPromptTooLongError,
+)
 
 class ResponsesHandler:
     """Handler para el endpoint /v1/responses con soporte streaming y no streaming."""
@@ -753,9 +759,53 @@ class ResponsesHandler:
 
                 return
 
+            except SAIAuthenticationError as e:
+                logger.error(f"🔐 [{request_id}] Autenticación fallida en streaming responses: {e}")
+                error_event = {
+                    "type": "error",
+                    "error": {
+                        "type": "authentication_error",
+                        "message": str(e)
+                    }
+                }
+                yield f"event: error\n"
+                yield f"data: {json.dumps(error_event)}\n\n"
+            except SAIRateLimitError as e:
+                logger.error(f"⚠️ [{request_id}] Rate limit en streaming responses: {e}")
+                error_event = {
+                    "type": "error",
+                    "error": {
+                        "type": "rate_limit_error",
+                        "message": str(e)
+                    }
+                }
+                yield f"event: error\n"
+                yield f"data: {json.dumps(error_event)}\n\n"
+            except SAIPromptTooLongError as e:
+                logger.error(f"⚠️ [{request_id}] Prompt demasiado largo en streaming responses: {e}")
+                error_event = {
+                    "type": "error",
+                    "error": {
+                        "type": "prompt_too_long",
+                        "message": str(e)
+                    }
+                }
+                yield f"event: error\n"
+                yield f"data: {json.dumps(error_event)}\n\n"
+            except SAIAPIError as e:
+                logger.error(f"❌ [{request_id}] Error SAI en streaming responses: {e}")
+                error_event = {
+                    "type": "error",
+                    "error": {
+                        "type": "sai_error",
+                        "message": str(e)
+                    }
+                }
+                yield f"event: error\n"
+                yield f"data: {json.dumps(error_event)}\n\n"
             except Exception as e:
                 logger.error(f"❌ [{request_id}] Error en streaming: {type(e).__name__}: {str(e)}")
-                # Enviar evento de error
+                # Enviar evento de error genérico
                 error_event = {
                     "type": "error",
                     "error": {
