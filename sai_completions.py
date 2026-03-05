@@ -4,6 +4,12 @@ import time
 import json
 from starlette.responses import Response, StreamingResponse
 from sai_handler import sai_llm, logger
+from sai_exceptions import (
+    SAIAPIError,
+    SAIAuthenticationError,
+    SAIRateLimitError,
+    SAIPromptTooLongError,
+)
 
 class CompletionsHandler:
     """Handler para endpoints de Completions (legacy OpenAI format)"""
@@ -136,6 +142,42 @@ class CompletionsHandler:
 
                 logger.info(f"✅ [{request_id}] Streaming completado | Chunks: {chunk_count}")
 
+            except SAIAuthenticationError as e:
+                logger.error(f"🔐 [{request_id}] Autenticación fallida en streaming completions: {e}")
+                error_chunk = {
+                    "error": {
+                        "message": str(e),
+                        "type": "authentication_error"
+                    }
+                }
+                yield f"data: {json.dumps(error_chunk)}\n\n"
+            except SAIRateLimitError as e:
+                logger.error(f"⚠️ [{request_id}] Rate limit en streaming completions: {e}")
+                error_chunk = {
+                    "error": {
+                        "message": str(e),
+                        "type": "rate_limit_error"
+                    }
+                }
+                yield f"data: {json.dumps(error_chunk)}\n\n"
+            except SAIPromptTooLongError as e:
+                logger.error(f"⚠️ [{request_id}] Prompt demasiado largo en streaming completions: {e}")
+                error_chunk = {
+                    "error": {
+                        "message": str(e),
+                        "type": "prompt_too_long"
+                    }
+                }
+                yield f"data: {json.dumps(error_chunk)}\n\n"
+            except SAIAPIError as e:
+                logger.error(f"❌ [{request_id}] Error SAI en streaming completions: {e}")
+                error_chunk = {
+                    "error": {
+                        "message": str(e),
+                        "type": "sai_error"
+                    }
+                }
+                yield f"data: {json.dumps(error_chunk)}\n\n"
             except Exception as e:
                 logger.error(f"❌ [{request_id}] Error en streaming: {type(e).__name__}: {str(e)}")
                 error_chunk = {
