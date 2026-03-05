@@ -482,6 +482,67 @@ class SAILLM(CustomLLM):
             })
         return normalized or None
 
+    def _extract_all_tool_call_blocks(self, trimmed: str, request_id: str) -> tuple[Optional[list], str]:
+        """
+                Extrae TODOS los bloques {"tool_calls":[...]} del texto usando raw_decode,
+                lo que soporta correctamente JSON anidado con corchetes/llaves complejas.
+                """
+        decoder = json.JSONDecoder()
+        all_tool_calls = []
+        # Registrar (start, end) de cada bloque JSON válido encontrado
+        found_spans = []
+
+        # Encontrar todas las posiciones donde aparece el marcador
+        search_start = 0
+        while True:
+            marker_idx = trimmed.find('{"tool_calls"', search_start)
+            if marker_idx == -1:
+                break
+
+            try:
+                obj, end_offset = decoder.raw_decode(trimmed, marker_idx)
+            except json.JSONDecodeError:
+                # No es JSON válido desde esta posición, avanzar
+                search_start = marker_idx + 1
+                continue
+
+            abs_end = marker_idx + end_offset
+
+            if isinstance(obj, dict) and "tool_calls" in obj:
+                normalized = self._normalize_tool_calls(obj.get("tool_calls"), request_id)
+                if normalized:
+                    all_tool_calls.extend(normalized)
+                    found_spans.append((marker_idx, abs_end))
+                    logger.info(
+                        f"🧪 [{request_id}] [TOOLS] Bloque tool_calls extraído | "
+                        f"pos={marker_idx}..{abs_end} | "
+                        f"tool_calls en bloque: {len(normalized)}"
+                    )
+                else:
+                    logger.warning(
+                        f"⚠️ [{request_id}] [TOOLS] Bloque tool_calls vacío tras normalizar | "
+                        f"pos={marker_idx}..{abs_end}"
+                    )
+
+            search_start = abs_end  # avanzar al siguiente candidato
+
+        if not all_tool_calls:
+            return None, trimmed
+
+        # Eliminar todos los bloques del texto (de atrás hacia adelante para no desplazar índices)
+        cleaned = trimmed
+        for start, end in reversed(found_spans):
+            cleaned = cleaned[:start] + cleaned[end:]
+        cleaned = cleaned.strip()
+
+        logger.info(
+            f"🧪 [{request_id}] [TOOLS] Extracción múltiple completada | "
+            f"Bloques válidos: {len(found_spans)} | "
+            f"tool_calls totales: {len(all_tool_calls)} | "
+            f"cleaned_len={len(cleaned)}"
+        )
+        return all_tool_calls, cleaned
+
     def _try_parse_from(self, start_idx: int, request_id: str, trimmed, decoder) -> tuple[Optional[list], Optional[int], Optional[int], Optional[str]]:
         candidate = trimmed[start_idx:]
         try:
@@ -596,6 +657,19 @@ class SAILLM(CustomLLM):
                 )
 
         decoder = json.JSONDecoder()
+
+        # 0) Extraer TODOS los bloques {"tool_calls":[...]} usando raw_decode
+        #    Soporta múltiples bloques y JSON anidado complejo
+        multi_tool_calls, multi_cleaned = self._extract_all_tool_call_blocks(trimmed, request_id)
+        if multi_tool_calls:
+            after_tail = multi_cleaned[-500:] if len(multi_cleaned) > 500 else multi_cleaned
+            logger.info(
+                f"🧪 [{request_id}] [TOOLS] AFTER extracted (multi-block) | "
+                f"cleaned_len={len(multi_cleaned)} | "
+                f"tool_calls_count={len(multi_tool_calls)} | "
+                f"cleaned_tail_preview={after_tail!r}"
+            )
+            return multi_tool_calls, multi_cleaned
 
         # 1) Camino rápido: buscar el marcador {"tool_calls" desde el final
         marker_idx = trimmed.rfind('{"tool_calls"')
