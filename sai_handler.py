@@ -12,6 +12,15 @@ from dotenv import load_dotenv
 from litellm import CustomLLM, ModelResponse
 from litellm.types.utils import GenericStreamingChunk
 from logging.handlers import RotatingFileHandler
+from sai_exceptions import (
+    SAIAPIError,
+    SAIAuthenticationError,
+    SAIRateLimitError,
+    SAIPromptTooLongError,
+    SAIServerError,
+    SAIConnectionError,
+    SAITimeoutError,
+)
 
 # Cargar variables de entorno
 load_dotenv()
@@ -337,7 +346,7 @@ class SAILLM(CustomLLM):
         system_prompt = ""
         processed_messages = messages
 
-        if messages and messages[0].get("role") in "system":
+        if messages and messages[0].get("role") == "system":
             system_prompt = messages[0].get("content")
             processed_messages = messages[1:]
             logger.info(
@@ -482,67 +491,6 @@ class SAILLM(CustomLLM):
             })
         return normalized or None
 
-    def _extract_all_tool_call_blocks(self, trimmed: str, request_id: str) -> tuple[Optional[list], str]:
-        """
-                Extrae TODOS los bloques {"tool_calls":[...]} del texto usando raw_decode,
-                lo que soporta correctamente JSON anidado con corchetes/llaves complejas.
-                """
-        decoder = json.JSONDecoder()
-        all_tool_calls = []
-        # Registrar (start, end) de cada bloque JSON válido encontrado
-        found_spans = []
-
-        # Encontrar todas las posiciones donde aparece el marcador
-        search_start = 0
-        while True:
-            marker_idx = trimmed.find('{"tool_calls"', search_start)
-            if marker_idx == -1:
-                break
-
-            try:
-                obj, end_offset = decoder.raw_decode(trimmed, marker_idx)
-            except json.JSONDecodeError:
-                # No es JSON válido desde esta posición, avanzar
-                search_start = marker_idx + 1
-                continue
-
-            abs_end = marker_idx + end_offset
-
-            if isinstance(obj, dict) and "tool_calls" in obj:
-                normalized = self._normalize_tool_calls(obj.get("tool_calls"), request_id)
-                if normalized:
-                    all_tool_calls.extend(normalized)
-                    found_spans.append((marker_idx, abs_end))
-                    logger.info(
-                        f"🧪 [{request_id}] [TOOLS] Bloque tool_calls extraído | "
-                        f"pos={marker_idx}..{abs_end} | "
-                        f"tool_calls en bloque: {len(normalized)}"
-                    )
-                else:
-                    logger.warning(
-                        f"⚠️ [{request_id}] [TOOLS] Bloque tool_calls vacío tras normalizar | "
-                        f"pos={marker_idx}..{abs_end}"
-                    )
-
-            search_start = abs_end  # avanzar al siguiente candidato
-
-        if not all_tool_calls:
-            return None, trimmed
-
-        # Eliminar todos los bloques del texto (de atrás hacia adelante para no desplazar índices)
-        cleaned = trimmed
-        for start, end in reversed(found_spans):
-            cleaned = cleaned[:start] + cleaned[end:]
-        cleaned = cleaned.strip()
-
-        logger.info(
-            f"🧪 [{request_id}] [TOOLS] Extracción múltiple completada | "
-            f"Bloques válidos: {len(found_spans)} | "
-            f"tool_calls totales: {len(all_tool_calls)} | "
-            f"cleaned_len={len(cleaned)}"
-        )
-        return all_tool_calls, cleaned
-
     def _try_parse_from(self, start_idx: int, request_id: str, trimmed, decoder) -> tuple[Optional[list], Optional[int], Optional[int], Optional[str]]:
         candidate = trimmed[start_idx:]
         try:
@@ -658,19 +606,6 @@ class SAILLM(CustomLLM):
 
         decoder = json.JSONDecoder()
 
-        # 0) Extraer TODOS los bloques {"tool_calls":[...]} usando raw_decode
-        #    Soporta múltiples bloques y JSON anidado complejo
-        multi_tool_calls, multi_cleaned = self._extract_all_tool_call_blocks(trimmed, request_id)
-        if multi_tool_calls:
-            after_tail = multi_cleaned[-500:] if len(multi_cleaned) > 500 else multi_cleaned
-            logger.info(
-                f"🧪 [{request_id}] [TOOLS] AFTER extracted (multi-block) | "
-                f"cleaned_len={len(multi_cleaned)} | "
-                f"tool_calls_count={len(multi_tool_calls)} | "
-                f"cleaned_tail_preview={after_tail!r}"
-            )
-            return multi_tool_calls, multi_cleaned
-
         # 1) Camino rápido: buscar el marcador {"tool_calls" desde el final
         marker_idx = trimmed.rfind('{"tool_calls"')
         if marker_idx != -1:
@@ -720,30 +655,6 @@ class SAILLM(CustomLLM):
 
         # No se encontró JSON tool_calls al final
         logger.info(f"🧪 [{request_id}] [TOOLS] extractor: NO tool_calls JSON encontrado al final")
-
-        # 3) Fallback final: regex para custom_tool_call con arguments no-JSON (ej: apply_patch)
-        import re
-
-        pattern = r'\{[^{}]*"type"\s*:\s*"custom_tool_call"[^{}]*"name"\s*:\s*"([^"]+)"[^{}]*"arguments"\s*:\s*"((?:[^"\\]|\\.)*)"\s*\}'
-        match = re.search(pattern, trimmed, re.DOTALL)
-        if match:
-            name = match.group(1)
-            arguments_raw = match.group(2).replace('\\n', '\n').replace('\\"', '"')
-            tool_calls = [{
-                "id": f"call_{request_id}_0",
-                "type": "custom_tool_call",
-                "function": {
-                    "name": name,
-                    "arguments": arguments_raw
-                }
-            }]
-            cleaned = trimmed[:match.start()].rstrip()
-            logger.info(
-                f"🧪 [{request_id}] [TOOLS] AFTER extracted (regex custom_tool_call) | "
-                f"name={name} | cleaned_len={len(cleaned)}"
-            )
-            return tool_calls, cleaned
-
         return None, text
 
     # ---------------- Síncrono ----------------
@@ -1373,89 +1284,99 @@ class SAILLM(CustomLLM):
 
         return response_headers
 
-    def _handle_http_401_error(self, resp, auth_method: str, url: str, request_id: str) -> tuple[str, None]:
-        """Maneja errores HTTP 401 Unauthorized."""
+    def _handle_http_401_error(self, resp, auth_method: str, url: str, request_id: str) -> None:
+        """Maneja errores HTTP 401 Unauthorized lanzando SAIAuthenticationError."""
         logger.error(
             f"🔐 [{request_id}] [HTTP 401] Unauthorized | "
             f"Auth usado: {auth_method} | "
             f"Diagnóstico: Credencial rechazada por el servidor SAI | "
-            f"URL: {url} | "
-            f"Acción: Retornando UNAUTHORIZED_ERROR (no se reintentará)"
+            f"URL: {url}"
         )
-        return "UNAUTHORIZED_ERROR", None
+        error_message = self._build_auth_error_message(auth_method)
+        raise SAIAuthenticationError(error_message)
 
-    def _handle_http_429_error(self, resp, auth_method: str, request_id: str) -> tuple[Optional[str], None]:
-        """Maneja errores HTTP 429 Rate Limit."""
+    def _handle_http_429_error(self, resp, auth_method: str, request_id: str) -> None:
+        """Maneja errores HTTP 429 Rate Limit lanzando SAIRateLimitError."""
         response_text = resp.text if resp else ""
 
         if "Test template usage limit exceeded" in response_text:
             logger.warning(
                 f"⚠️ [{request_id}] [HTTP 429] Rate Limit - Test Template | "
                 f"Auth usado: {auth_method} | "
-                f"Diagnóstico: Límite de uso de template de prueba excedido | "
-                f"Acción: Retornando None para reintentar con Cookie si está disponible"
+                f"Diagnóstico: Límite de uso de template de prueba excedido"
             )
-            return None, None
         else:
             logger.error(
                 f"❌ [{request_id}] [HTTP 429] Rate Limit - Otro tipo | "
                 f"Auth usado: {auth_method} | "
-                f"Respuesta del servidor: {response_text[:200]} | "
-                f"Acción: Retornando None (sin reintento)"
+                f"Respuesta del servidor: {response_text[:200]}"
             )
-            return None, None
 
-    def _handle_http_500_error(self, resp, auth_method: str, request_id: str) -> tuple[str, None]:
-        """Maneja errores HTTP 500 Internal Server Error."""
+        raise SAIRateLimitError("Se ha excedido el límite de uso de la API de SAI.")
+
+    def _handle_http_500_error(self, resp, auth_method: str, request_id: str) -> None:
+        """Maneja errores HTTP 500 Internal Server Error lanzando excepciones específicas."""
         response_text = resp.text if resp else ""
+        lower_text = response_text.lower()
 
-        if "prompt is too long" in response_text.lower() or "openaicompatible" in response_text.lower():
+        if "prompt is too long" in lower_text or "openaicompatible" in lower_text:
             logger.warning(
                 f"⚠️ [{request_id}] [HTTP 500] Prompt Too Long | "
                 f"Auth usado: {auth_method} | "
                 f"Diagnóstico: El contexto excede el límite del modelo | "
-                f"Respuesta SAI (preview): {response_text[:200]} | "
-                f"Acción: Retornando PROMPT_TOO_LONG (finish_reason=length)"
+                f"Respuesta SAI (preview): {response_text[:200]}"
             )
-            return "PROMPT_TOO_LONG", None
-        else:
-            logger.error(
-                f"❌ [{request_id}] [HTTP 500] Internal Server Error | "
-                f"Auth usado: {auth_method} | "
-                f"Diagnóstico: Error interno del servidor SAI (no relacionado con tamaño de prompt) | "
-                f"Respuesta SAI (preview): {response_text[:200]} | "
-                f"Acción: Retornando HTTP_500_ERROR (finish_reason=error)"
+            raise SAIPromptTooLongError(
+                "El contexto o historial enviado a SAI excede el límite soportado por el modelo."
             )
-            return "HTTP_500_ERROR", None
 
-    def _handle_other_http_errors(self, resp, auth_method: str, url: str, e: Exception, request_id: str) -> tuple[None, None]:
-        """Maneja otros errores HTTP no específicos."""
+        logger.error(
+            f"❌ [{request_id}] [HTTP 500] Internal Server Error | "
+            f"Auth usado: {auth_method} | "
+            f"Diagnóstico: Error interno del servidor SAI (no relacionado con tamaño de prompt) | "
+            f"Respuesta SAI (preview): {response_text[:200]}"
+        )
+        raise SAIServerError(
+            "Error interno del servidor SAI al procesar la solicitud."
+        )
+
+    def _handle_other_http_errors(self, resp, auth_method: str, url: str, e: Exception, request_id: str) -> None:
+        """Maneja otros errores HTTP no específicos lanzando SAIAPIError."""
         status_code = resp.status_code if resp else "N/A"
         response_text = resp.text[:200] if resp else ""
 
         logger.error(
-            f"❌ [{request_id}] [HTTP {status_code}] Error no manejado específicamente | "
+            f"❌ [{request_id}] [HTTP {status_code}] Error HTTP no manejado específicamente | "
             f"Auth usado: {auth_method} | "
             f"URL: {url} | "
             f"Exception: {type(e).__name__}: {str(e)} | "
-            f"Respuesta del servidor: {response_text} | "
-            f"Acción: Retornando None"
+            f"Respuesta del servidor: {response_text}"
         )
-        return None, None
+        raise SAIAPIError(
+            f"Error HTTP {status_code} al llamar a SAI: {response_text}"
+        )
 
-    def _handle_request_exceptions(self, e: Exception, resp, auth_method: str, url: str,
-                                   request_timeout: int, request_id: str) -> tuple[Optional[str], Optional[dict]]:
+    def _handle_request_exceptions(
+        self,
+        e: Exception,
+        resp,
+        auth_method: str,
+        url: str,
+        request_timeout: int,
+        request_id: str,
+    ) -> None:
+        """Traduce excepciones de requests a excepciones de dominio SAI."""
         if isinstance(e, requests.HTTPError):
             if resp is not None and resp.status_code == 401:
-                return self._handle_http_401_error(resp, auth_method, url, request_id)
+                self._handle_http_401_error(resp, auth_method, url, request_id)
 
             if resp is not None and resp.status_code == 429:
-                return self._handle_http_429_error(resp, auth_method, request_id)
+                self._handle_http_429_error(resp, auth_method, request_id)
 
             if resp is not None and resp.status_code == 500:
-                return self._handle_http_500_error(resp, auth_method, request_id)
+                self._handle_http_500_error(resp, auth_method, request_id)
 
-            return self._handle_other_http_errors(resp, auth_method, url, e, request_id)
+            self._handle_other_http_errors(resp, auth_method, url, e, request_id)
 
         elif isinstance(e, requests.Timeout):
             logger.error(
@@ -1463,10 +1384,11 @@ class SAILLM(CustomLLM):
                 f"Timeout configurado: {request_timeout}s | "
                 f"Auth usado: {auth_method} | "
                 f"URL: {url} | "
-                f"Diagnóstico: El servidor SAI no respondió en el tiempo esperado | "
-                f"Acción: Retornando None"
+                f"Diagnóstico: El servidor SAI no respondió en el tiempo esperado"
             )
-            return None, None
+            raise SAITimeoutError(
+                f"Timeout al llamar a SAI tras {request_timeout} segundos."
+            )
 
         elif isinstance(e, requests.RequestException):
             logger.error(
@@ -1474,12 +1396,18 @@ class SAILLM(CustomLLM):
                 f"Auth usado: {auth_method} | "
                 f"URL: {url} | "
                 f"Exception: {type(e).__name__}: {str(e)} | "
-                f"Diagnóstico: Problema de red o conectividad con SAI | "
-                f"Acción: Retornando None"
+                f"Diagnóstico: Problema de red o conectividad con SAI"
             )
-            return None, None
+            raise SAIConnectionError(
+                f"Error de red al intentar conectar con SAI: {type(e).__name__}: {str(e)}"
+            )
 
-        return None, None
+        else:
+            logger.error(
+                f"❌ [{request_id}] [ERROR] Excepción inesperada al llamar a SAI | "
+                f"Tipo: {type(e).__name__}: {str(e)}"
+            )
+            raise SAIAPIError(str(e))
 
     # ---------------- Llamada privada a SAI (refactorizada) ----------------
     def _call_sai(self, system: str, user: str, tool_call_id: Optional[str],
@@ -1553,15 +1481,10 @@ class SAILLM(CustomLLM):
         if VERBOSE_LOGGING:
             logger.debug(f"[{request_id}] Payload completo:\n{json.dumps(data, indent=2, ensure_ascii=False)}")
 
-        # Ejecutar request con reintentos
+        # Ejecutar request con reintentos (puede lanzar SAI*Error en caso de fallo)
         response, response_headers, auth_method_used = self._execute_request_with_retry(
             url, data, custom_cookie, api_key_to_use, user_api_key, request_id
         )
-
-        # Manejar errores
-        error_result = self._handle_error_response(response, auth_method_used, request_id, chat_messages, url)
-        if error_result:
-            return error_result
 
         # Actualizar datos de uso
         usage_data = self._update_usage_data(response_headers)
@@ -1600,7 +1523,10 @@ class SAILLM(CustomLLM):
             return resp.text, response_headers
 
         except requests.RequestException as e:
-            return self._handle_request_exceptions(e, resp, auth_method, url, request_timeout, request_id)
+            # Traducir y relanzar como excepción de dominio
+            self._handle_request_exceptions(e, resp, auth_method, url, request_timeout, request_id)
+            # La línea siguiente no debería alcanzarse nunca, pero se deja por claridad tipada.
+            raise
 
 
 # ---------------- Instancia global ----------------
