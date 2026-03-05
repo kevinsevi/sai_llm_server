@@ -65,17 +65,26 @@ Si este proyecto te ha sido útil y te ha ahorrado tiempo, considera invitarme u
 
 ## 📋 Descripción General
 
-SAI LLM Server es un proxy personalizado que integra la API de SAI (SAI Applications) con LiteLLM, permitiendo usar modelos de SAI a través de una interfaz compatible con OpenAI. Soporta autenticación por usuario mediante API Keys personalizadas, con fallback automático a credenciales del sistema.
+SAI LLM Server es un **gateway que simula una API compatible con OpenAI** sobre la plataforma SAI. SAI recibe mensajes en su propia estructura (`inputs.system`, `inputs.user`, `chatMessages`, `tools` serializados, etc.); este proyecto implementa una **capa de traducción** que acepta formatos OpenAI y los convierte al contrato nativo de SAI. Soporta autenticación por usuario mediante API Keys personalizadas, con fallback automático a credenciales del sistema.
 
 ## 🏗️ Arquitectura
 
 ```
-Cliente (OpenAI API) → LiteLLM Proxy → SAI Handler → SAI API
-                              ↓
-                    [user_api_key opcional]
-                              ↓
-                    [SAI_KEY/SAI_COOKIE fallback]
+Cliente (formato OpenAI)  →  Gateway FastAPI  →  Capa de traducción  →  SAI (formato nativo)
+     │                            │                      │                      │
+     │  /v1/chat/completions      │  sai_gateway.py      │  sai_converter.py    │  /api/templates/.../execute
+     │  /v1/completions           │  sai_chat_completions│  sai_handler.py     │  inputs.system, user,
+     │  /v1/messages              │  sai_completions    │  sai_extractor.py    │  chatMessages, tools
+     │  /v1/responses             │  sai_responses      │                      │
+     └────────────────────────────┴─────────────────────┴──────────────────────┘
 ```
+
+**Flujo de datos:**
+1. El cliente envía requests en formato OpenAI (Chat Completions, Completions, Messages, Responses).
+2. El gateway FastAPI (`sai_gateway.py`) recibe y delega a handlers por endpoint.
+3. La capa de traducción convierte mensajes, tools y metadata al formato interno.
+4. `sai_handler.py` adapta ese formato al contrato HTTP de SAI y realiza la llamada.
+5. La respuesta de SAI se transforma de vuelta a formato OpenAI antes de devolverla al cliente.
 
 El servidor actúa como intermediario entre clientes que usan la API de OpenAI y el servicio SAI, manejando:
 - **Autenticación por usuario** con API Keys personalizadas
@@ -167,13 +176,25 @@ docker service logs -f sai_llm_sai_llm
 
 ```
 .
-├── sai_handler.py       # Handler personalizado para SAI con soporte user_api_key
-├── config.yaml          # Configuración de LiteLLM con forward headers
-├── Dockerfile           # Imagen Docker
-├── docker-compose.yml   # Orquestación para desarrollo
-├── docker-stack.yml     # Orquestación para producción (Swarm)
-├── .env                 # Variables de entorno (no incluir en git)
-└── logs/               # Directorio de logs
+├── sai_gateway.py           # API FastAPI: endpoints OpenAI-compatibles
+├── sai_handler.py           # Adaptador SAI: traduce formato interno → contrato SAI
+├── sai_converter.py         # Conversión OpenAI ↔ formato interno
+├── sai_extractor.py         # Extracción de texto de estructuras anidadas
+├── sai_completions.py       # Handler /v1/completions (legacy)
+├── sai_chat_completions.py  # Handler /v1/chat/completions
+├── sai_responses.py         # Handler /v1/responses (Responses API + Codex CLI)
+├── sai_builder.py           # Construcción de eventos SSE (Responses API)
+├── sai_models.py           # Catálogo de modelos
+├── sai_system_prompt.py    # Gestión de system prompts adicionales por endpoint
+├── sai_exceptions.py       # Excepciones de dominio (auth, rate limit, etc.)
+├── system_prompt_responses.txt      # Reglas extra para /v1/responses
+├── system_prompt_chat_completions.txt  # Reglas extra para /v1/chat/completions
+├── config.yaml             # Configuración LiteLLM (si se usa proxy)
+├── Dockerfile               # Imagen Docker
+├── docker-compose.yml      # Orquestación para desarrollo
+├── docker-stack.yml        # Orquestación para producción (Swarm)
+├── .env                    # Variables de entorno (no incluir en git)
+└── logs/                   # Directorio de logs
     └── sai_handler.log
 ```
 
@@ -266,10 +287,21 @@ litellm_settings:
 
 ## 🔌 Uso del API
 
-### Endpoint
+### Endpoints disponibles
+
+| Endpoint | Formato | Streaming |
+|----------|---------|-----------|
+| `POST /v1/completions` o `/completions` | OpenAI Completions (legacy) | Sí |
+| `POST /v1/chat/completions` o `/chat/completions` | OpenAI Chat Completions | Sí |
+| `POST /v1/messages` o `/messages` | OpenAI Messages | No |
+| `POST /v1/responses` o `/responses` | OpenAI Responses API (Codex CLI) | Sí |
+| `GET /v1/models` o `/models` | Lista de modelos | - |
+| `GET /health` | Health check | - |
+
+### Ejemplo: Chat Completions
 
 ```
-POST http://localhost:4000/chat/completions
+POST http://localhost:8000/v1/chat/completions
 ```
 
 ### Ejemplo de Request
@@ -645,6 +677,14 @@ docker node ls
 
 ## 🔧 Desarrollo
 
+### Capa de traducción
+
+La conversión entre formatos se realiza en varios puntos:
+
+- **`sai_converter.py`**: `openai_request_to_litellm_request()` convierte body OpenAI → `messages` + `kwargs` internos; `litellm_response_to_openai_response()` convierte la respuesta de vuelta.
+- **`sai_extractor.py`**: Extrae texto de estructuras anidadas (content con `text`, `input_text`, `arguments`, etc.) para normalizar el contenido de mensajes.
+- **`sai_handler.py`**: Adapta el formato interno al contrato HTTP de SAI (`inputs.system`, `inputs.user`, `chatMessages`, `tools` como JSON string) y extrae tool_calls embebidos en texto.
+
 ### Estructura del Handler (`sai_handler.py`)
 
 ```python
@@ -656,10 +696,11 @@ class SAILLM(CustomLLM):
 
     # Métodos privados
     _extract_user_api_key()           # Extrae y valida user_api_key
-    _prepare_messages()               # Procesa mensajes
-    _call_sai()                       # Llama a SAI API
+    _prepare_messages()               # Procesa mensajes → formato SAI
+    _call_sai()                       # Llama a SAI API (formato nativo)
     _make_request()                   # HTTP request con auth
     _extract_plugin_wrapped_message() # Detecta plugin IDE
+    _extract_tool_calls_from_plain_text_end()  # Extrae tool_calls de respuesta
 ```
 
 ### Flujo de Autenticación en el Código
