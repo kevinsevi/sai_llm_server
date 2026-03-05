@@ -232,7 +232,7 @@ class ResponsesHandler:
                 # 🔧 Enriquecer tools: agregar apply_patch dentro de kwargs["tools"]
                 # (sin pisar los tools existentes y evitando duplicados)
                 apply_patch_tool = {
-                    "type": "custom",
+                    "type": "custom_tool_call",
                     "name": "apply_patch",
                     "description": "Use the `apply_patch` tool to edit files. This is a FREEFORM tool, so do not wrap the patch in JSON.",
                     "format": {
