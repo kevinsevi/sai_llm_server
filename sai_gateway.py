@@ -12,6 +12,12 @@ from sai_completions import completions_handler
 from sai_chat_completions import chat_completions_handler
 from sai_responses import responses_handler
 from sai_models import get_models_list, get_model_by_id
+from sai_exceptions import (
+    SAIAPIError,
+    SAIAuthenticationError,
+    SAIRateLimitError,
+    SAIPromptTooLongError,
+)
 
 app = FastAPI(title="OpenAI SAI Gateway", version="2.0.0")
 
@@ -100,10 +106,22 @@ async def completions_endpoint(request: Request):
             logger.info(f"📄 [{request_id}] Modo sin streaming")
             return await completions_handler.completions_non_streaming(request_id, messages, kwargs, model)
 
+    except SAIAuthenticationError as e:
+        logger.error(f"🔐 [{request_id}] Autenticación fallida en /v1/completions: {e}")
+        raise HTTPException(status_code=401, detail=str(e))
+    except SAIRateLimitError as e:
+        logger.error(f"⚠️ [{request_id}] Rate limit en /v1/completions: {e}")
+        raise HTTPException(status_code=429, detail=str(e))
+    except SAIPromptTooLongError as e:
+        logger.error(f"⚠️ [{request_id}] Prompt demasiado largo en /v1/completions: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+    except SAIAPIError as e:
+        logger.error(f"❌ [{request_id}] Error SAI en /v1/completions: {e}")
+        raise HTTPException(status_code=502, detail=str(e))
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"❌ [{request_id}] Error en /v1/completions: {type(e).__name__}: {str(e)}")
+        logger.error(f"❌ [{request_id}] Error inesperado en /v1/completions: {type(e).__name__}: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -182,10 +200,22 @@ async def chat_completions_endpoint(request: Request):
             logger.info(f"📄 [{request_id}] Modo sin streaming")
             return await chat_completions_handler.chat_completions_non_streaming(request_id, messages, kwargs, model)
 
+    except SAIAuthenticationError as e:
+        logger.error(f"🔐 [{request_id}] Autenticación fallida en /v1/chat/completions: {e}")
+        raise HTTPException(status_code=401, detail=str(e))
+    except SAIRateLimitError as e:
+        logger.error(f"⚠️ [{request_id}] Rate limit en /v1/chat/completions: {e}")
+        raise HTTPException(status_code=429, detail=str(e))
+    except SAIPromptTooLongError as e:
+        logger.error(f"⚠️ [{request_id}] Prompt demasiado largo en /v1/chat/completions: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+    except SAIAPIError as e:
+        logger.error(f"❌ [{request_id}] Error SAI en /v1/chat/completions: {e}")
+        raise HTTPException(status_code=502, detail=str(e))
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"❌ [{request_id}] Error en /v1/chat/completions: {type(e).__name__}: {str(e)}")
+        logger.error(f"❌ [{request_id}] Error inesperado en /v1/chat/completions: {type(e).__name__}: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -267,10 +297,22 @@ async def messages_endpoint(request: Request):
 
         return JSONResponse(content=openai_response)
 
+    except SAIAuthenticationError as e:
+        logger.error(f"🔐 [{request_id}] Autenticación fallida en /v1/messages: {e}")
+        raise HTTPException(status_code=401, detail=str(e))
+    except SAIRateLimitError as e:
+        logger.error(f"⚠️ [{request_id}] Rate limit en /v1/messages: {e}")
+        raise HTTPException(status_code=429, detail=str(e))
+    except SAIPromptTooLongError as e:
+        logger.error(f"⚠️ [{request_id}] Prompt demasiado largo en /v1/messages: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+    except SAIAPIError as e:
+        logger.error(f"❌ [{request_id}] Error SAI en /v1/messages: {e}")
+        raise HTTPException(status_code=502, detail=str(e))
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"❌ [{request_id}] Error en /v1/messages: {type(e).__name__}: {str(e)}")
+        logger.error(f"❌ [{request_id}] Error inesperado en /v1/messages: {type(e).__name__}: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -348,10 +390,22 @@ async def responses_endpoint(request: Request):
                 request_id, output_item_id, messages, kwargs, model
             )
 
+    except SAIAuthenticationError as e:
+        logger.error(f"🔐 [{request_id}] Autenticación fallida en /v1/responses: {e}")
+        raise HTTPException(status_code=401, detail=str(e))
+    except SAIRateLimitError as e:
+        logger.error(f"⚠️ [{request_id}] Rate limit en /v1/responses: {e}")
+        raise HTTPException(status_code=429, detail=str(e))
+    except SAIPromptTooLongError as e:
+        logger.error(f"⚠️ [{request_id}] Prompt demasiado largo en /v1/responses: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+    except SAIAPIError as e:
+        logger.error(f"❌ [{request_id}] Error SAI en /v1/responses: {e}")
+        raise HTTPException(status_code=502, detail=str(e))
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"❌ [{request_id}] Error en /v1/responses: {type(e).__name__}: {str(e)}")
+        logger.error(f"❌ [{request_id}] Error inesperado en /v1/responses: {type(e).__name__}: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
