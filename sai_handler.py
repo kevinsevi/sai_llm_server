@@ -720,6 +720,30 @@ class SAILLM(CustomLLM):
 
         # No se encontró JSON tool_calls al final
         logger.info(f"🧪 [{request_id}] [TOOLS] extractor: NO tool_calls JSON encontrado al final")
+
+        # 3) Fallback final: regex para custom_tool_call con arguments no-JSON (ej: apply_patch)
+        import re
+
+        pattern = r'\{[^{}]*"type"\s*:\s*"custom_tool_call"[^{}]*"name"\s*:\s*"([^"]+)"[^{}]*"arguments"\s*:\s*"((?:[^"\\]|\\.)*)"\s*\}'
+        match = re.search(pattern, trimmed, re.DOTALL)
+        if match:
+            name = match.group(1)
+            arguments_raw = match.group(2).replace('\\n', '\n').replace('\\"', '"')
+            tool_calls = [{
+                "id": f"call_{request_id}_0",
+                "type": "custom_tool_call",
+                "function": {
+                    "name": name,
+                    "arguments": arguments_raw
+                }
+            }]
+            cleaned = trimmed[:match.start()].rstrip()
+            logger.info(
+                f"🧪 [{request_id}] [TOOLS] AFTER extracted (regex custom_tool_call) | "
+                f"name={name} | cleaned_len={len(cleaned)}"
+            )
+            return tool_calls, cleaned
+
         return None, text
 
     # ---------------- Síncrono ----------------
