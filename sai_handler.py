@@ -470,6 +470,26 @@ class SAILLM(CustomLLM):
             # Normalizar argumentos a string JSON si vienen como dict/list/etc.
             if not isinstance(arguments, str):
                 arguments = json.dumps(arguments, ensure_ascii=False)
+            else:
+                # Validar que el string sea JSON válido; intentar reparar si no lo es
+                try:
+                    json.loads(arguments)
+                except json.JSONDecodeError:
+                    # Intentar reparar escapes dobles comunes
+                    repaired = arguments.replace('\\"', '"').replace('\\\\', '\\')
+                    try:
+                        json.loads(repaired)
+                        logger.warning(
+                            f"⚠️ [{request_id}] [TOOLS] arguments JSON inválido reparado | "
+                            f"Name: {name} | Original len: {len(arguments)}"
+                        )
+                        arguments = repaired
+                    except json.JSONDecodeError:
+                        logger.warning(
+                            f"⚠️ [{request_id}] [TOOLS] arguments JSON inválido no reparable, usando {{}} | "
+                            f"Name: {name} | Preview: {arguments[:80]!r}"
+                        )
+                        arguments = "{}"
 
             # Normalizar type: "function_call" -> "function" (formato esperado aguas abajo)
             tc_type = tc.get("type")
