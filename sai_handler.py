@@ -661,7 +661,6 @@ class SAILLM(CustomLLM):
             if tool_calls:
                 cleaned = trimmed[:js].rstrip()
 
-                # Logs "después" (AFTER)
                 after_tail = cleaned[-500:] if len(cleaned) > 500 else cleaned
                 logger.info(
                     f"🧪 [{request_id}] [TOOLS] AFTER extracted | "
@@ -672,6 +671,72 @@ class SAILLM(CustomLLM):
                 )
 
                 return tool_calls, cleaned
+
+        # 3) Multi-JSON: modelo emitió varios {"tool_calls"...} + texto inventado al final
+        EXAMPLE_MARKERS = (
+            "se vería", "por ejemplo", "el formato", "como este", "así:", "ejemplo:",
+            "sería así", "quedaría así", "como sigue", "a continuación", "siguiente forma",
+            "de esta forma", "de este modo", "como muestra", "ilustración",
+        )
+        INVENTED_RESULT_MARKERS = (
+            "- `", "**", "├", "└", "│", ".py`", ".java`", ".ts`", ".js`",
+            ".json`", ".yaml`", ".yml`", ".md`", ".txt`",
+        )
+        all_tool_calls = []
+        search_start = 0
+        first_json_pos = None
+        last_json_end = None
+
+        while True:
+            marker_pos = trimmed.find('{"tool_calls"', search_start)
+            if marker_pos == -1:
+                break
+            candidate = trimmed[marker_pos:]
+            try:
+                obj, end = decoder.raw_decode(candidate)
+            except Exception:
+                search_start = marker_pos + 1
+                continue
+
+            if isinstance(obj, dict) and "tool_calls" in obj:
+                tcs = self._normalize_tool_calls(obj.get("tool_calls"), request_id)
+                if tcs:
+                    if first_json_pos is None:
+                        first_json_pos = marker_pos
+                    last_json_end = marker_pos + end
+                    all_tool_calls.extend(tcs)
+            search_start = marker_pos + 1
+
+        if all_tool_calls and first_json_pos is not None:
+            text_before = trimmed[:first_json_pos].strip()
+            text_after = trimmed[last_json_end:].strip()
+
+            if text_before:
+                text_before_lower = text_before.lower()
+                is_example_intro = any(marker in text_before_lower for marker in EXAMPLE_MARKERS)
+                if is_example_intro:
+                    logger.info(
+                        f"🧪 [{request_id}] [TOOLS] multi-JSON descartado: texto antes contiene marcador de ejemplo | "
+                        f"text_before_preview={text_before[-200:]!r}"
+                    )
+                    return None, text
+
+            text_after_looks_invented = any(m in text_after for m in INVENTED_RESULT_MARKERS)
+            no_text_before = not text_before
+
+            if no_text_before or text_after_looks_invented:
+                logger.info(
+                    f"🧪 [{request_id}] [TOOLS] multi-JSON ejecutable detectado | "
+                    f"count={len(all_tool_calls)} | no_text_before={no_text_before} | "
+                    f"text_after_looks_invented={text_after_looks_invented} | "
+                    f"text_after_preview={text_after[:200]!r}"
+                )
+                return all_tool_calls, text_before
+
+            logger.info(
+                f"🧪 [{request_id}] [TOOLS] multi-JSON descartado: texto después no parece resultado inventado | "
+                f"text_after_preview={text_after[:200]!r}"
+            )
 
         # No se encontró JSON tool_calls al final
         logger.info(f"🧪 [{request_id}] [TOOLS] extractor: NO tool_calls JSON encontrado al final")
