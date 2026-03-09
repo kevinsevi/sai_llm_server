@@ -163,6 +163,12 @@ Si decides ejecutar un tool:
 - SIN markdown
 - SIN backticks
 
+REGLA CRÍTICA ANTI-MEZCLA (OBLIGATORIA):
+- Cuando decides usar un tool, está ABSOLUTAMENTE PROHIBIDO escribir cualquier texto narrativo antes o después del JSON (ej: "Voy a leer...", "Ahora ejecuto...", etc.).
+- El turno completo debe ser ÚNICAMENTE el JSON de tool_calls, nada más.
+- Si necesitas explicar algo, hazlo en un turno SEPARADO sin tool_calls.
+- Mezclar texto + JSON en el mismo turno rompe el protocolo y causa errores en el cliente.
+
 REGLA CRÍTICA: VALIDACIÓN DE JSON ANTES DE EMITIR TOOL_CALLS (OBLIGATORIA)
 Antes de enviar la respuesta final con {"tool_calls":[...]} debes validar mentalmente que el JSON es correcto.
 Checklist obligatorio (NO lo escribas en la respuesta, solo ejecútalo):
