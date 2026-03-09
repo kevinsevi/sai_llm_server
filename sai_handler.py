@@ -467,29 +467,36 @@ class SAILLM(CustomLLM):
             if not name:
                 continue
 
-            # Normalizar argumentos a string JSON si vienen como dict/list/etc.
+            tc_type = tc.get("type")
+            is_custom_tool_call = tc_type == "custom_tool_call"
+            expects_json_arguments = not is_custom_tool_call
+
+            # Normalizar argumentos
             if not isinstance(arguments, str):
-                arguments = json.dumps(arguments, ensure_ascii=False)
+                if expects_json_arguments:
+                    arguments = json.dumps(arguments, ensure_ascii=False)
+                else:
+                    arguments = "" if arguments is None else str(arguments)
             else:
-                # Validar que el string sea JSON válido; intentar reparar si no lo es
-                try:
-                    json.loads(arguments)
-                except json.JSONDecodeError:
-                    # Intentar reparar escapes dobles comunes
-                    repaired = arguments.replace('\\"', '"').replace('\\\\', '\\')
+                # Solo validar JSON para function/function_call (NO para custom_tool_call/apply_patch)
+                if expects_json_arguments:
                     try:
-                        json.loads(repaired)
-                        logger.warning(
-                            f"⚠️ [{request_id}] [TOOLS] arguments JSON inválido reparado | "
-                            f"Name: {name} | Original len: {len(arguments)}"
-                        )
-                        arguments = repaired
+                        json.loads(arguments)
                     except json.JSONDecodeError:
-                        logger.warning(
-                            f"⚠️ [{request_id}] [TOOLS] arguments JSON inválido no reparable, usando {{}} | "
-                            f"Name: {name} | Preview: {arguments[:80]!r}"
-                        )
-                        arguments = "{}"
+                        repaired = arguments.replace('\\"', '"').replace('\\\\', '\\')
+                        try:
+                            json.loads(repaired)
+                            logger.warning(
+                                f"⚠️ [{request_id}] [TOOLS] arguments JSON inválido reparado | "
+                                f"Name: {name} | Original len: {len(arguments)}"
+                            )
+                            arguments = repaired
+                        except json.JSONDecodeError:
+                            logger.warning(
+                                f"⚠️ [{request_id}] [TOOLS] arguments JSON inválido no reparable, usando {{}} | "
+                                f"Name: {name} | Preview: {arguments[:80]!r}"
+                            )
+                            arguments = "{}"
 
             # Normalizar type: "function_call" -> "function" (formato esperado aguas abajo)
             tc_type = tc.get("type")
