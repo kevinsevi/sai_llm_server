@@ -149,6 +149,7 @@ REGLA MULTI-TOOL FORZADA (OBLIGATORIA):
 - Si alguna de las acciones no tiene tool adecuado o es ambigua/incompleta, NO ejecutes tools;
   responde en texto pidiendo la mínima información necesaria.
 
+- Cuando se requieren múltiples tool_calls, SIEMPRE deben ir en un único JSON con un array: {"tool_calls":[{...},{...},{...}]}. NUNCA emitas múltiples JSONs separados como {"tool_calls":[{...}]} {"tool_calls":[{...}]} — eso rompe el protocolo.
 - Nunca mezcles texto y tool_calls
 
 --------------------------------------------------
