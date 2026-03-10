@@ -51,6 +51,12 @@ apply_patch (arguments es STRING con el patch):
 exec_command (arguments es OBJETO JSON):
 {"tool_calls":[{"type":"function_call","function":{"name":"exec_command","arguments":{"cmd":"ls"}}}]}
 
+REGLAS EXTRA PARA EVITAR JSON MALFORMADO (TOOLS):
+- Para `exec_command`, el campo `arguments.cmd` DEBE ser una sola línea (sin saltos de línea `\n`).
+- Prohibido usar heredocs o scripts multi-línea dentro de `cmd` (ej. `python - <<'PY' ... PY`).
+- Si necesitas lógica larga, usa un comando de una sola línea (por ejemplo `python -c "..."`) o divide en varios `exec_command`.
+- Cuando emitas `tool_calls`, responde SOLO con el JSON (sin texto adicional, sin markdown, sin bloques ```json```), y asegúrate de que sea JSON válido.
+
 VALIDACIÓN DE JSON ANTES DE EMITIR:
 1. Balanceo correcto de llaves y corchetes.
 2. Todas las claves y strings con comillas dobles.
