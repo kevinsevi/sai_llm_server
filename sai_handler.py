@@ -518,11 +518,37 @@ class SAILLM(CustomLLM):
             })
         return normalized or None
 
-    def _try_parse_from(self, start_idx: int, request_id: str, trimmed, decoder) -> tuple[Optional[list], Optional[int], Optional[int], Optional[str]]:
+    def _try_parse_from(self, start_idx: int, request_id: str, trimmed, decoder) -> tuple[
+        Optional[list], Optional[int], Optional[int], Optional[str]]:
         candidate = trimmed[start_idx:]
         try:
             obj, end = decoder.raw_decode(candidate)
-        except Exception:
+        except json.JSONDecodeError as e:
+            # Log detallado del error de JSON
+            err_pos = getattr(e, "pos", None)
+            err_msg = getattr(e, "msg", str(e))
+            err_line = getattr(e, "lineno", None)
+            err_col = getattr(e, "colno", None)
+
+            if isinstance(err_pos, int):
+                start = max(0, err_pos - 120)
+                end_snip = min(len(candidate), err_pos + 120)
+                snippet = candidate[start:end_snip]
+            else:
+                snippet = candidate[:240]
+
+            logger.warning(
+                f"⚠️ [{request_id}] [TOOLS] JSONDecodeError en raw_decode | "
+                f"msg={err_msg!r} pos={err_pos} line={err_line} col={err_col} | "
+                f"start_idx={start_idx} candidate_len={len(candidate)} | "
+                f"snippet={snippet!r}"
+            )
+            return None, None, None, None
+        except Exception as e:
+            logger.warning(
+                f"⚠️ [{request_id}] [TOOLS] Error inesperado parseando JSON | "
+                f"type={type(e).__name__} msg={str(e)} start_idx={start_idx}"
+            )
             return None, None, None, None
 
         # Debe consumir todo el final salvo whitespace
