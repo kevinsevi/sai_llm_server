@@ -112,35 +112,23 @@ AVAILABLE_MODELS = [
             "provider_model": "SAI/OPENAI/dall-e-3"
         }
     },
-    {
-        "id": "dall-e-2",
-        "object": "model",
-        "created": 1735689600,
-        "owned_by": "stefanini",
-        "permission": [],
-        "root": "dall-e-2",
-        "parent": None,
-        "metadata": {
-            "provider_model": "SAI/OPENAI/dall-e-2"
-        }
-    },
-    {
-        "id": "gpt-image-1",
-        "object": "model",
-        "created": 1735689600,
-        "owned_by": "stefanini",
-        "permission": [],
-        "root": "gpt-image-1",
-        "parent": None,
-        "metadata": {
-            "provider_model": "SAI/OPENAI/gpt-image-1"
-        }
-    },
-    {
-        "id": "gpt-4-turbo-2024-04-09",
-        "object": "model",
-        "created": 1735689600,
-        "owned_by": "stefanini",
+	    {
+	        "id": "dall-e-2",
+	        "object": "model",
+	        "created": 1735689600,
+	        "owned_by": "stefanini",
+	        "permission": [],
+	        "root": "dall-e-2",
+	        "parent": None,
+	        "metadata": {
+	            "provider_model": "SAI/OPENAI/dall-e-2"
+	        }
+	    },
+	    {
+	        "id": "gpt-4-turbo-2024-04-09",
+	        "object": "model",
+	        "created": 1735689600,
+	        "owned_by": "stefanini",
         "permission": [],
         "root": "gpt-4-turbo-2024-04-09",
         "parent": None,
