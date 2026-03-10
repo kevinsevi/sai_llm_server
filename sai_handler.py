@@ -467,9 +467,36 @@ class SAILLM(CustomLLM):
             if not name:
                 continue
 
-            # Normalizar argumentos a string JSON si vienen como dict/list/etc.
+            tc_type = tc.get("type")
+            is_custom_tool_call = tc_type == "custom_tool_call"
+            expects_json_arguments = not is_custom_tool_call
+
+            # Normalizar argumentos
             if not isinstance(arguments, str):
-                arguments = json.dumps(arguments, ensure_ascii=False)
+                if expects_json_arguments:
+                    arguments = json.dumps(arguments, ensure_ascii=False)
+                else:
+                    arguments = "" if arguments is None else str(arguments)
+            else:
+                # Solo validar JSON para function/function_call (NO para custom_tool_call/apply_patch)
+                if expects_json_arguments:
+                    try:
+                        json.loads(arguments)
+                    except json.JSONDecodeError:
+                        repaired = arguments.replace('\\"', '"').replace('\\\\', '\\')
+                        try:
+                            json.loads(repaired)
+                            logger.warning(
+                                f"⚠️ [{request_id}] [TOOLS] arguments JSON inválido reparado | "
+                                f"Name: {name} | Original len: {len(arguments)}"
+                            )
+                            arguments = repaired
+                        except json.JSONDecodeError:
+                            logger.warning(
+                                f"⚠️ [{request_id}] [TOOLS] arguments JSON inválido no reparable, usando {{}} | "
+                                f"Name: {name} | Preview: {arguments[:80]!r}"
+                            )
+                            arguments = "{}"
 
             # Normalizar type: "function_call" -> "function" (formato esperado aguas abajo)
             tc_type = tc.get("type")
@@ -491,11 +518,37 @@ class SAILLM(CustomLLM):
             })
         return normalized or None
 
-    def _try_parse_from(self, start_idx: int, request_id: str, trimmed, decoder) -> tuple[Optional[list], Optional[int], Optional[int], Optional[str]]:
+    def _try_parse_from(self, start_idx: int, request_id: str, trimmed, decoder) -> tuple[
+        Optional[list], Optional[int], Optional[int], Optional[str]]:
         candidate = trimmed[start_idx:]
         try:
             obj, end = decoder.raw_decode(candidate)
-        except Exception:
+        except json.JSONDecodeError as e:
+            # Log detallado del error de JSON
+            err_pos = getattr(e, "pos", None)
+            err_msg = getattr(e, "msg", str(e))
+            err_line = getattr(e, "lineno", None)
+            err_col = getattr(e, "colno", None)
+
+            if isinstance(err_pos, int):
+                start = max(0, err_pos - 120)
+                end_snip = min(len(candidate), err_pos + 120)
+                snippet = candidate[start:end_snip]
+            else:
+                snippet = candidate[:240]
+
+            logger.warning(
+                f"⚠️ [{request_id}] [TOOLS] JSONDecodeError en raw_decode | "
+                f"msg={err_msg!r} pos={err_pos} line={err_line} col={err_col} | "
+                f"start_idx={start_idx} candidate_len={len(candidate)} | "
+                f"snippet={snippet!r}"
+            )
+            return None, None, None, None
+        except Exception as e:
+            logger.warning(
+                f"⚠️ [{request_id}] [TOOLS] Error inesperado parseando JSON | "
+                f"type={type(e).__name__} msg={str(e)} start_idx={start_idx}"
+            )
             return None, None, None, None
 
         # Debe consumir todo el final salvo whitespace
@@ -641,7 +694,6 @@ class SAILLM(CustomLLM):
             if tool_calls:
                 cleaned = trimmed[:js].rstrip()
 
-                # Logs "después" (AFTER)
                 after_tail = cleaned[-500:] if len(cleaned) > 500 else cleaned
                 logger.info(
                     f"🧪 [{request_id}] [TOOLS] AFTER extracted | "
@@ -652,6 +704,72 @@ class SAILLM(CustomLLM):
                 )
 
                 return tool_calls, cleaned
+
+        # 3) Multi-JSON: modelo emitió varios {"tool_calls"...} + texto inventado al final
+        EXAMPLE_MARKERS = (
+            "se vería", "por ejemplo", "el formato", "como este", "así:", "ejemplo:",
+            "sería así", "quedaría así", "como sigue", "a continuación", "siguiente forma",
+            "de esta forma", "de este modo", "como muestra", "ilustración",
+        )
+        INVENTED_RESULT_MARKERS = (
+            "- `", "**", "├", "└", "│", ".py`", ".java`", ".ts`", ".js`",
+            ".json`", ".yaml`", ".yml`", ".md`", ".txt`",
+        )
+        all_tool_calls = []
+        search_start = 0
+        first_json_pos = None
+        last_json_end = None
+
+        while True:
+            marker_pos = trimmed.find('{"tool_calls"', search_start)
+            if marker_pos == -1:
+                break
+            candidate = trimmed[marker_pos:]
+            try:
+                obj, end = decoder.raw_decode(candidate)
+            except Exception:
+                search_start = marker_pos + 1
+                continue
+
+            if isinstance(obj, dict) and "tool_calls" in obj:
+                tcs = self._normalize_tool_calls(obj.get("tool_calls"), request_id)
+                if tcs:
+                    if first_json_pos is None:
+                        first_json_pos = marker_pos
+                    last_json_end = marker_pos + end
+                    all_tool_calls.extend(tcs)
+            search_start = marker_pos + 1
+
+        if all_tool_calls and first_json_pos is not None:
+            text_before = trimmed[:first_json_pos].strip()
+            text_after = trimmed[last_json_end:].strip()
+
+            if text_before:
+                text_before_lower = text_before.lower()
+                is_example_intro = any(marker in text_before_lower for marker in EXAMPLE_MARKERS)
+                if is_example_intro:
+                    logger.info(
+                        f"🧪 [{request_id}] [TOOLS] multi-JSON descartado: texto antes contiene marcador de ejemplo | "
+                        f"text_before_preview={text_before[-200:]!r}"
+                    )
+                    return None, text
+
+            text_after_looks_invented = any(m in text_after for m in INVENTED_RESULT_MARKERS)
+            no_text_before = not text_before
+
+            if no_text_before or text_after_looks_invented:
+                logger.info(
+                    f"🧪 [{request_id}] [TOOLS] multi-JSON ejecutable detectado | "
+                    f"count={len(all_tool_calls)} | no_text_before={no_text_before} | "
+                    f"text_after_looks_invented={text_after_looks_invented} | "
+                    f"text_after_preview={text_after[:200]!r}"
+                )
+                return all_tool_calls, text_before
+
+            logger.info(
+                f"🧪 [{request_id}] [TOOLS] multi-JSON descartado: texto después no parece resultado inventado | "
+                f"text_after_preview={text_after[:200]!r}"
+            )
 
         # No se encontró JSON tool_calls al final
         logger.info(f"🧪 [{request_id}] [TOOLS] extractor: NO tool_calls JSON encontrado al final")

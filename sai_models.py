@@ -112,35 +112,23 @@ AVAILABLE_MODELS = [
             "provider_model": "SAI/OPENAI/dall-e-3"
         }
     },
-    {
-        "id": "dall-e-2",
-        "object": "model",
-        "created": 1735689600,
-        "owned_by": "stefanini",
-        "permission": [],
-        "root": "dall-e-2",
-        "parent": None,
-        "metadata": {
-            "provider_model": "SAI/OPENAI/dall-e-2"
-        }
-    },
-    {
-        "id": "gpt-image-1",
-        "object": "model",
-        "created": 1735689600,
-        "owned_by": "stefanini",
-        "permission": [],
-        "root": "gpt-image-1",
-        "parent": None,
-        "metadata": {
-            "provider_model": "SAI/OPENAI/gpt-image-1"
-        }
-    },
-    {
-        "id": "gpt-4-turbo-2024-04-09",
-        "object": "model",
-        "created": 1735689600,
-        "owned_by": "stefanini",
+	    {
+	        "id": "dall-e-2",
+	        "object": "model",
+	        "created": 1735689600,
+	        "owned_by": "stefanini",
+	        "permission": [],
+	        "root": "dall-e-2",
+	        "parent": None,
+	        "metadata": {
+	            "provider_model": "SAI/OPENAI/dall-e-2"
+	        }
+	    },
+	    {
+	        "id": "gpt-4-turbo-2024-04-09",
+	        "object": "model",
+	        "created": 1735689600,
+	        "owned_by": "stefanini",
         "permission": [],
         "root": "gpt-4-turbo-2024-04-09",
         "parent": None,
@@ -242,30 +230,6 @@ AVAILABLE_MODELS = [
         "parent": None,
         "metadata": {
             "provider_model": "SAI/OPENAI/o3-mini-2025-01-31"
-        }
-    },
-    {
-        "id": "o3-mini-2025-01-31",
-        "object": "model",
-        "created": 1735689600,
-        "owned_by": "stefanini",
-        "permission": [],
-        "root": "o3-mini-2025-01-31",
-        "parent": None,
-        "metadata": {
-            "provider_model": "SAI/OPENAI/o3-mini-2025-01-31"
-        }
-    },
-    {
-        "id": "o4-mini-2025-04-16",
-        "object": "model",
-        "created": 1735689600,
-        "owned_by": "stefanini",
-        "permission": [],
-        "root": "o4-mini-2025-04-16",
-        "parent": None,
-        "metadata": {
-            "provider_model": "SAI/OPENAI/o4-mini-2025-04-16"
         }
     },
     {
@@ -1193,18 +1157,6 @@ AVAILABLE_MODELS = [
         }
     },
     {
-        "id": "gpt-5-2025-08-07",
-        "object": "model",
-        "created": 1735689600,
-        "owned_by": "stefanini",
-        "permission": [],
-        "root": "gpt-5-2025-08-07",
-        "parent": None,
-        "metadata": {
-            "provider_model": "SAI/OPENAI/gpt-5-2025-08-07"
-        }
-    },
-    {
         "id": "gemini-1.5-flash-001",
         "object": "model",
         "created": 1735689600,
@@ -1289,18 +1241,6 @@ AVAILABLE_MODELS = [
         }
     },
     {
-        "id": "gpt-5-mini-2025-08-07",
-        "object": "model",
-        "created": 1735689600,
-        "owned_by": "stefanini",
-        "permission": [],
-        "root": "gpt-5-mini-2025-08-07",
-        "parent": None,
-        "metadata": {
-            "provider_model": "SAI/OPENAI/gpt-5-mini-2025-08-07"
-        }
-    },
-    {
         "id": "claude-3-sonnet-20240229",
         "object": "model",
         "created": 1735689600,
@@ -1373,18 +1313,6 @@ AVAILABLE_MODELS = [
         }
     },
     {
-        "id": "gpt-5-nano-2025-08-07",
-        "object": "model",
-        "created": 1735689600,
-        "owned_by": "stefanini",
-        "permission": [],
-        "root": "gpt-5-nano-2025-08-07",
-        "parent": None,
-        "metadata": {
-            "provider_model": "SAI/OPENAI/gpt-5-nano-2025-08-07"
-        }
-    },
-    {
         "id": "amazon.nova-lite-v1:0",
         "object": "model",
         "created": 1735689600,
@@ -1442,18 +1370,6 @@ AVAILABLE_MODELS = [
         "parent": None,
         "metadata": {
             "provider_model": "SAI/XAI/grok-4-fast-reasoning"
-        }
-    },
-    {
-        "id": "gpt-5-2025-08-07",
-        "object": "model",
-        "created": 1735689600,
-        "owned_by": "stefanini",
-        "permission": [],
-        "root": "gpt-5-2025-08-07",
-        "parent": None,
-        "metadata": {
-            "provider_model": "SAI/OPENAI/gpt-5-2025-08-07"
         }
     },
     {
@@ -1517,18 +1433,6 @@ AVAILABLE_MODELS = [
         }
     },
     {
-        "id": "gpt-5-nano-2025-08-07",
-        "object": "model",
-        "created": 1735689600,
-        "owned_by": "stefanini",
-        "permission": [],
-        "root": "gpt-5-nano-2025-08-07",
-        "parent": None,
-        "metadata": {
-            "provider_model": "SAI/OPENAI/gpt-5-nano-2025-08-07"
-        }
-    },
-    {
         "id": "amazon.nova-micro-v1:0",
         "object": "model",
         "created": 1735689600,
@@ -1574,18 +1478,6 @@ AVAILABLE_MODELS = [
         "parent": None,
         "metadata": {
             "provider_model": "SAI/XAI/grok-4-0709"
-        }
-    },
-    {
-        "id": "gpt-5-mini-2025-08-07",
-        "object": "model",
-        "created": 1735689600,
-        "owned_by": "stefanini",
-        "permission": [],
-        "root": "gpt-5-mini-2025-08-07",
-        "parent": None,
-        "metadata": {
-            "provider_model": "SAI/OPENAI/gpt-5-mini-2025-08-07"
         }
     },
     {
