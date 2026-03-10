@@ -55,6 +55,11 @@ REGLAS EXTRA PARA EVITAR JSON MALFORMADO (TOOLS):
 - Para `exec_command`, el campo `arguments.cmd` DEBE ser una sola línea (sin saltos de línea `\n`).
 - Prohibido usar heredocs o scripts multi-línea dentro de `cmd` (ej. `python - <<'PY' ... PY`).
 - Si necesitas lógica larga, usa un comando de una sola línea (por ejemplo `python -c "..."`) o divide en varios `exec_command`.
+- Para `exec_command`, evita comillas dobles `"` dentro de `arguments.cmd` siempre que sea posible.
+- Si usas `python -c`, usa `python -c '...codigo...'` (comillas simples externas), no `python -c "..."`.
+- Evita f-strings y patrones con muchos backslashes dentro de `cmd`; prefiere `print(k, v)` o `print("%s: %s" % (k, v))`.
+- Para `exec_command`, evita usar `\\` (backslash) dentro de `arguments.cmd`; reescribe el comando para no necesitar escapes.
+- Solo se permite `\\` si es estrictamente necesario (p.ej. rutas Windows); si aparece, minimízalo y mantén `cmd` lo más simple posible.
 - Cuando emitas `tool_calls`, responde SOLO con el JSON (sin texto adicional, sin markdown, sin bloques ```json```), y asegúrate de que sea JSON válido.
 
 VALIDACIÓN DE JSON ANTES DE EMITIR:
