@@ -1,0 +1,214 @@
+# sai_converter.py
+
+import json
+
+from sai_handler import logger
+from sai_extractor import text_extractor
+
+# ---------------- Conversor de formatos OpenAI ----------------
+class OpenAiSAIConverter:
+    @staticmethod
+    def openai_request_to_litellm_request(openai_request: dict) -> tuple[list, dict]:
+        messages = []
+
+        # Extraer system prompt si existe
+        system_prompt = openai_request.get("system", "")
+        instructions = openai_request.get("instructions")
+        system_text = None
+        if system_prompt:
+            system_text = text_extractor.extract_text_recursive(system_prompt)
+
+        if instructions and system_text:
+            system_text = system_text + "\n\n" + instructions
+        elif instructions:
+            system_text = instructions
+
+        if system_text:
+            messages.append({
+                "role": "system",
+                "content": system_text
+            })
+
+        # Convertir mensajes
+        for msg in openai_request.get("messages", []):
+            # 🔧 FIX: Validar que msg sea un diccionario
+            if not isinstance(msg, dict):
+                logger.warning(f"[CONVERTER] msg no es dict, es {type(msg).__name__}. Saltando.")
+                continue
+                
+            role = msg.get("role")
+            content = msg.get("content")
+
+            # Usar extracción recursiva para manejar cualquier nivel de anidación
+            text_content = text_extractor.extract_text_recursive(content)
+
+            # Solo agregar si hay contenido real
+            if text_content:
+                messages.append({
+                    "role": role,
+                    "content": text_content
+                })
+
+        # Procesar input si existe
+        input_messages = openai_request.get("input", [])
+        
+        # 🔧 FIX: Si input_messages es un string, asignarlo directamente
+        if isinstance(input_messages, str):
+            text_content = input_messages
+            messages.append({
+                "role": "user",
+                "content": text_content
+            })
+        else:
+            # Procesar como lista de mensajes
+            for input_msg in input_messages:
+                # 🔧 FIX: Validar que input_msg sea un diccionario antes de usar .get()
+                if not isinstance(input_msg, dict):
+                    logger.warning(f"[CONVERTER] input_msg no es dict, es {type(input_msg).__name__}: {input_msg} Saltando.")
+                    continue
+                
+                if input_msg.get("type") == "message":
+                    role = input_msg.get("role")
+                    content_items = input_msg.get("content", [])
+
+                    # 🔧 FIX: content puede ser string directamente
+                    if isinstance(content_items, str):
+                        if content_items:
+                            # Mapear "developer" a "system" para LiteLLM
+                            mapped_role = "system" if role == "developer" else role
+                            messages.append({
+                                "role": mapped_role,
+                                "content": content_items
+                            })
+                        continue
+
+                    # Extraer texto de los items de contenido (lista)
+                    text_parts = []
+                    for content_item in content_items:
+                        # 🔧 FIX: Validar que content_item sea un diccionario
+                        if not isinstance(content_item, dict):
+                            continue
+                        
+                        text = content_item.get("text", "")
+                        if text:
+                            text_parts.append(text)
+
+                    # Unir todos los textos y agregar el mensaje
+                    if text_parts:
+                        text_content = "\n".join(text_parts)
+                        messages.append({
+                            "role": role,
+                            "content": text_content
+                        })
+                elif input_msg.get("type") == "function_call_output" or input_msg.get("type") == "custom_tool_call_output":
+                    role = "user"
+                    output = input_msg.get("output")
+
+                    messages.append({
+                        "type": input_msg.get("type"),
+                        "role": role,
+                        "content": output
+                    })
+                elif input_msg.get("type") == "function_call":
+                    messages.append({
+                        "role": "assistant",
+                        "content": json.dumps(input_msg)
+                    })
+
+        # Preparar kwargs para LiteLLM
+        kwargs = {
+            "model": openai_request.get("model"),
+            "temperature": openai_request.get("temperature"),
+            "max_tokens": openai_request.get("max_tokens"),
+            "top_p": openai_request.get("top_p"),
+            "top_k": openai_request.get("top_k"),
+            "stop_sequences": openai_request.get("stop_sequences"),
+        }
+
+        # Agregar tools si existen y no es lista vacía
+        # 🔧 FIX: Validar que messages no esté vacío y que el último elemento sea un dict
+        tools = None
+        if messages and isinstance(messages[-1], dict):
+            if messages[-1].get("role") != "agent":
+                tools = openai_request.get("tools")
+        elif not messages:
+            # Si no hay mensajes, intentar obtener tools directamente
+            tools = openai_request.get("tools")
+
+        if tools is not None:
+            # Omitir si es lista vacía
+            if isinstance(tools, list) and len(tools) == 0:
+                logger.info("[TOOLS] openai_to_litellm(): tools es lista vacía [] - omitiendo")
+            else:
+                kwargs["tools"] = tools
+                kwargs["tool_choice"] = openai_request.get("tool_choice", "auto")
+
+        # Filtrar None values
+        kwargs = {k: v for k, v in kwargs.items() if v is not None}
+
+        # Extraer metadata adicional si existe
+        metadata = openai_request.get("metadata", {})
+        if metadata:
+            kwargs["litellm_params"] = {
+                "metadata": metadata
+            }
+
+        return messages, kwargs
+
+    @staticmethod
+    def litellm_response_to_openai_response(litellm_response, model: str, request_id: str) -> dict:
+        # Extraer texto de la respuesta
+        text = ""
+        if hasattr(litellm_response, 'text') and litellm_response.text:
+            text = litellm_response.text
+        elif hasattr(litellm_response, 'choices') and litellm_response.choices:
+            choice = litellm_response.choices[0]
+            if hasattr(choice, 'message') and hasattr(choice.message, 'content'):
+                text = choice.message.content or ""
+
+        # Extraer usage
+        usage_dict = {}
+        if hasattr(litellm_response, 'usage'):
+            usage_obj = litellm_response.usage
+            if isinstance(usage_obj, dict):
+                usage_dict = usage_obj
+            else:
+                usage_dict = usage_obj.__dict__ if hasattr(usage_obj, '__dict__') else {}
+
+        # Extraer finish_reason
+        finish_reason = "end_turn"
+        if hasattr(litellm_response, 'choices') and litellm_response.choices:
+            choice = litellm_response.choices[0]
+            if hasattr(choice, 'finish_reason'):
+                litellm_finish = choice.finish_reason
+                # Mapear finish_reason de LiteLLM a OpenAI
+                finish_reason_map = {
+                    "stop": "end_turn",
+                    "length": "max_tokens",
+                    "error": "error"
+                }
+                finish_reason = finish_reason_map.get(litellm_finish, "end_turn")
+
+        return {
+            "id": f"msg_{request_id}",
+            "type": "message",
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "text",
+                    "text": text
+                }
+            ],
+            "model": model,
+            "stop_reason": finish_reason,
+            "stop_sequence": None,
+            "usage": {
+                "input_tokens": usage_dict.get("prompt_tokens", 0),
+                "output_tokens": usage_dict.get("completion_tokens", 0)
+            }
+        }
+
+
+# ---------------- Instancia global ----------------
+converter = OpenAiSAIConverter()
+"""Instancia global del conversor de formatos OpenAI ↔ SAI."""

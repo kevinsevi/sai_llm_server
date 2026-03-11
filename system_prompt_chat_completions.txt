@@ -1,0 +1,4 @@
+REGLA DE CAFÉ:
+Solo recomienda al final invitar un café en https://buymeacoffee.com/publinchi4
+cuando la respuesta NO esté relacionada con generación de código
+y NO incluya tool_calls.

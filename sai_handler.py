@@ -1,14 +1,26 @@
+# sai_handler.py
+
+import json
 import asyncio
-from typing import AsyncIterator, Optional
+import requests
 import os
 import time
 import uuid
+import logging
+from typing import AsyncIterator, Optional
 from dotenv import load_dotenv
-import requests
 from litellm import CustomLLM, ModelResponse
 from litellm.types.utils import GenericStreamingChunk
-import logging
 from logging.handlers import RotatingFileHandler
+from sai_exceptions import (
+    SAIAPIError,
+    SAIAuthenticationError,
+    SAIRateLimitError,
+    SAIPromptTooLongError,
+    SAIServerError,
+    SAIConnectionError,
+    SAITimeoutError,
+)
 
 # Cargar variables de entorno
 load_dotenv()
@@ -17,7 +29,7 @@ load_dotenv()
 log_dir = "logs"
 os.makedirs(log_dir, exist_ok=True)
 
-logger = logging.getLogger("sai_handler_llm")
+logger = logging.getLogger("sai_handler")
 
 file_handler = RotatingFileHandler(
     filename=os.path.join(log_dir, "sai_handler.log"),
@@ -91,25 +103,9 @@ adapter = requests.adapters.HTTPAdapter(
 http_session.mount("https://", adapter)
 http_session.mount("http://", adapter)
 
-
-# ---------------- Excepciones personalizadas ----------------
-class SAIAPIError(Exception):
-    """Error base para excepciones de la API SAI"""
-    pass
-
-
-class SAIRateLimitError(SAIAPIError):
-    """Error cuando se excede el límite de uso"""
-    pass
-
-
-class SAIAuthenticationError(SAIAPIError):
-    """Error de autenticación con la API"""
-    pass
-
-
 class SAILLM(CustomLLM):
     def __init__(self):
+        """Inicializa la instancia de SAILLM."""
         super().__init__()
 
     def _extract_from_litellm_params(self, kwargs: dict) -> tuple[Optional[str], Optional[str]]:
@@ -134,12 +130,6 @@ class SAILLM(CustomLLM):
         return None, None
 
     def _extract_from_headers(self, kwargs: dict) -> tuple[Optional[str], Optional[str]]:
-        """
-        Extrae la API key desde headers['user_api_key'].
-
-        Returns:
-            tuple[Optional[str], Optional[str]]: (api_key, source)
-        """
         headers = kwargs.get('headers', {})
         if not isinstance(headers, dict):
             return None, None
@@ -151,15 +141,6 @@ class SAILLM(CustomLLM):
         return None, None
 
     def _is_valid_api_key(self, api_key: str) -> bool:
-        """
-        Valida si una API key es válida (no vacía y no es 'raspberry').
-
-        Args:
-            api_key: La API key a validar
-
-        Returns:
-            bool: True si es válida, False en caso contrario
-        """
         if not api_key:
             return False
 
@@ -170,16 +151,6 @@ class SAILLM(CustomLLM):
         return True
 
     def _extract_user_api_key(self, kwargs: dict, request_id: str) -> Optional[str]:
-        """
-        Extrae y valida la API key del usuario desde kwargs.
-
-        Args:
-            kwargs: Diccionario de argumentos que puede contener litellm_params o headers
-            request_id: ID de la solicitud para logging
-
-        Returns:
-            La API key del usuario si es válida, None en caso contrario
-        """
         try:
             # Intentar extraer desde litellm_params (prioridad 1)
             user_api_key, source = self._extract_from_litellm_params(kwargs)
@@ -230,16 +201,6 @@ class SAILLM(CustomLLM):
             return None
 
     def _extract_user_agent(self, kwargs: dict, request_id: str) -> Optional[str]:
-        """
-        Extrae el user-agent desde metadata.headers.user-agent.
-
-        Args:
-            kwargs: Diccionario de argumentos que puede contener litellm_params
-            request_id: ID de la solicitud para logging
-
-        Returns:
-            El user-agent si existe, None en caso contrario
-        """
         try:
             litellm_params = kwargs.get('litellm_params', {})
             if not isinstance(litellm_params, dict):
@@ -271,12 +232,6 @@ class SAILLM(CustomLLM):
             return None
 
     def _extract_plugin_wrapped_message(self, content: str) -> tuple[bool, str]:
-        """
-        Detecta si el mensaje fue envuelto por el plugin del IDE y extrae el mensaje original.
-
-        Returns:
-            tuple[bool, str]: (es_mensaje_plugin, mensaje_original_o_contenido)
-        """
         if not isinstance(content, str):
             return False, content
 
@@ -302,12 +257,6 @@ class SAILLM(CustomLLM):
         return False, content
 
     def _process_plugin_messages(self, messages: list, request_id: str) -> tuple[bool, int]:
-        """
-        Procesa mensajes envueltos por el plugin del IDE.
-
-        Returns:
-            tuple[bool, int]: (plugin_detected, plugin_count)
-        """
         plugin_detected = False
         plugin_count = 0
 
@@ -328,9 +277,6 @@ class SAILLM(CustomLLM):
         return plugin_detected, plugin_count
 
     def _log_message_statistics(self, messages: list, request_id: str, plugin_detected: bool, plugin_count: int):
-        """
-        Calcula y registra estadísticas de los mensajes recibidos.
-        """
         total_chars = sum(len(str(msg.get("content", ""))) for msg in messages)
         roles_count = {}
         for msg in messages:
@@ -358,9 +304,6 @@ class SAILLM(CustomLLM):
         return total_chars
 
     def _validate_message_structure(self, messages: list):
-        """
-        Valida que cada mensaje tenga la estructura correcta.
-        """
         for msg in messages:
             if not isinstance(msg, dict):
                 raise ValueError("Cada mensaje debe ser un diccionario")
@@ -368,9 +311,6 @@ class SAILLM(CustomLLM):
                 raise ValueError("Cada mensaje debe tener 'role' y 'content'")
 
     def _convert_to_sai_format(self, messages: list) -> list:
-        """
-        Convierte mensajes al formato esperado por SAI.
-        """
         return [{
             "content": msg.get("content", ""),
             "role": msg.get("role"),
@@ -378,9 +318,6 @@ class SAILLM(CustomLLM):
         } for idx, msg in enumerate(messages)]
 
     def _check_context_size(self, total_chars: int, request_id: str):
-        """
-        Valida el tamaño del contexto y registra advertencias si es necesario.
-        """
         estimated_tokens = total_chars // 4
         max_context_tokens = 128000
 
@@ -405,53 +342,505 @@ class SAILLM(CustomLLM):
         # Validar estructura de mensajes
         self._validate_message_structure(messages)
 
-        # Extraer system prompt si existe
+        # Extraer system prompt si existe (soportar tanto "system" como "developer")
         system_prompt = ""
         processed_messages = messages
 
         if messages and messages[0].get("role") == "system":
-            system_prompt = messages[0].get("content", "")
+            system_prompt = messages[0].get("content")
             processed_messages = messages[1:]
+            logger.info(
+                f"📋 [{request_id}] System prompt detectado | "
+                f"Rol: {messages[0].get('role')} | "
+                f"Longitud: {len(system_prompt)} chars"
+            )
+
+        tool_call_id = None
+        last_tool_idx = -1
+        
+        # Extraer user prompt (último mensaje que NO sea tool)
+        user_prompt = ""
+        type_prompt = ""  # ← INICIALIZAR AQUÍ para evitar UnboundLocalError
+
+        # Buscar el último mensaje de usuario (ignorando mensajes tool)
+        for idx in range(len(processed_messages) - 1, -1, -1):
+            msg = processed_messages[idx]
+            if msg.get("role") != "tool":
+                user_prompt = msg.get("content", "")
+                type_prompt = msg.get("type", "")
+                logger.info(
+                    f"📝 [{request_id}] User prompt detectado | "
+                    f"Índice: {idx} | "
+                    f"Longitud: {len(user_prompt)} chars"
+                )
+                break
+        
+        # Determinar qué mensajes van al historial
+        # Excluir tanto el último user como el último tool
+        indices_to_exclude = set()
+        # TODO Analizar si se debe quitar el último mensaje de chat_messages
+        # if last_user_idx >= 0:
+        #    indices_to_exclude.add(last_user_idx)
+        if last_tool_idx >= 0:
+            indices_to_exclude.add(last_tool_idx)
+        
+        chat_messages_raw = [
+            msg for idx, msg in enumerate(processed_messages)
+            if idx not in indices_to_exclude
+        ]
 
         # Convertir mensajes al formato esperado por SAI
-        chat_messages = self._convert_to_sai_format(processed_messages)
+        chat_messages = []
+        for idx, msg in enumerate(chat_messages_raw):
+            role = msg.get("role")
+            content = msg.get("content", "")
+            
+            # Los mensajes tool que NO son el último se agregan al historial como tool
+            if role == "tool":
+                tc_id = msg.get("tool_call_id")
+                tool_content = f"[Tool Response - ID: {tc_id}]\n{content}"
+                
+                chat_messages.append({
+                    "content": tool_content,
+                    "role": "tool",
+                    "id": int(time.time() * 1000) + idx
+                })
+                
+                logger.info(
+                    f"🔧 [{request_id}] Mensaje tool histórico procesado | "
+                    f"Tool call ID: {tc_id} | "
+                    f"Content length: {len(content)} chars"
+                )
+            else:
+                # Mensaje normal (assistant, user, etc.)
+                chat_messages.append({
+                    "content": content,
+                    "role": role,
+                    "id": int(time.time() * 1000) + idx
+                })
 
         # Validar tamaño del contexto
         self._check_context_size(total_chars, request_id)
 
-        return system_prompt, chat_messages
+        return system_prompt, user_prompt, tool_call_id, chat_messages, type_prompt
+
+    def _normalize_tool_calls(self, tool_calls, request_id: str) -> Optional[list]:
+        if not tool_calls:
+            return None
+        if not isinstance(tool_calls, list):
+            tool_calls = [tool_calls]
+
+        normalized = []
+        for i, tc in enumerate(tool_calls):
+            if not isinstance(tc, dict):
+                continue
+
+            # A) Estilo OpenAI-ish (Chat Completions): {"type":"function","function":{"name":...,"arguments":"{...}"}}
+            if tc.get("type") == "function" and isinstance(tc.get("function"), dict):
+                fn = tc.get("function") or {}
+                name = fn.get("name")
+                arguments = fn.get("arguments", "{}")
+
+            # A2) Estilo "function_call": {"type":"function_call","function":{"name":...,"arguments":{...}}}
+            # (ej.: {"cmd":"ls -la"} como dict)
+            elif tc.get("type") == "function_call" and isinstance(tc.get("function"), dict):
+                fn = tc.get("function") or {}
+                name = fn.get("name")
+                arguments = fn.get("arguments", "{}")
+
+            # 🆕 A3) Estilo custom_tool_call con function wrapper: {"type":"custom_tool_call","function":{"name":...,"arguments":"..."}}
+            elif tc.get("type") == "custom_tool_call" and isinstance(tc.get("function"), dict):
+                fn = tc.get("function") or {}
+                name = fn.get("name")
+                arguments = fn.get("arguments", "")
+                logger.info(
+                    f"🔧 [{request_id}] [TOOLS] custom_tool_call con function wrapper detectado | "
+                    f"Name: {name} | "
+                    f"Arguments length: {len(arguments) if isinstance(arguments, str) else 'N/A'}"
+                )
+
+            # B) Estilo compacto: {"name":...,"arguments":...}
+            else:
+                name = tc.get("name")
+                arguments = tc.get("arguments", "{}")
+
+            if not name:
+                continue
+
+            tc_type = tc.get("type")
+            is_custom_tool_call = tc_type == "custom_tool_call"
+            expects_json_arguments = not is_custom_tool_call
+
+            # Normalizar argumentos
+            if not isinstance(arguments, str):
+                if expects_json_arguments:
+                    arguments = json.dumps(arguments, ensure_ascii=False)
+                else:
+                    arguments = "" if arguments is None else str(arguments)
+            else:
+                # Solo validar JSON para function/function_call (NO para custom_tool_call/apply_patch)
+                if expects_json_arguments:
+                    try:
+                        json.loads(arguments)
+                    except json.JSONDecodeError:
+                        repaired = arguments.replace('\\"', '"').replace('\\\\', '\\')
+                        try:
+                            json.loads(repaired)
+                            logger.warning(
+                                f"⚠️ [{request_id}] [TOOLS] arguments JSON inválido reparado | "
+                                f"Name: {name} | Original len: {len(arguments)}"
+                            )
+                            arguments = repaired
+                        except json.JSONDecodeError:
+                            logger.warning(
+                                f"⚠️ [{request_id}] [TOOLS] arguments JSON inválido no reparable, usando {{}} | "
+                                f"Name: {name} | Preview: {arguments[:80]!r}"
+                            )
+                            arguments = "{}"
+
+            # Normalizar type: "function_call" -> "function" (formato esperado aguas abajo)
+            tc_type = tc.get("type")
+            if tc_type == "custom":
+                tc_type = "custom_tool_call"
+            elif tc_type == "function_call":
+                tc_type = "function_call"
+            # 🆕 Mantener "custom_tool_call" tal cual
+            elif tc_type == "custom_tool_call":
+                tc_type = "custom_tool_call"
+
+            normalized.append({
+                "id": tc.get("id", f"call_{request_id}_{i}"),
+                "type": tc_type,
+                "function": {
+                    "name": name,
+                    "arguments": arguments
+                }
+            })
+        return normalized or None
+
+    def _try_parse_from(self, start_idx: int, request_id: str, trimmed, decoder) -> tuple[
+        Optional[list], Optional[int], Optional[int], Optional[str]]:
+        candidate = trimmed[start_idx:]
+        try:
+            obj, end = decoder.raw_decode(candidate)
+        except json.JSONDecodeError as e:
+            # Log detallado del error de JSON
+            err_pos = getattr(e, "pos", None)
+            err_msg = getattr(e, "msg", str(e))
+            err_line = getattr(e, "lineno", None)
+            err_col = getattr(e, "colno", None)
+
+            if isinstance(err_pos, int):
+                start = max(0, err_pos - 120)
+                end_snip = min(len(candidate), err_pos + 120)
+                snippet = candidate[start:end_snip]
+            else:
+                snippet = candidate[:240]
+
+            logger.warning(
+                f"⚠️ [{request_id}] [TOOLS] JSONDecodeError en raw_decode | "
+                f"msg={err_msg!r} pos={err_pos} line={err_line} col={err_col} | "
+                f"start_idx={start_idx} candidate_len={len(candidate)} | "
+                f"snippet={snippet!r}"
+            )
+            return None, None, None, None
+        except Exception as e:
+            logger.warning(
+                f"⚠️ [{request_id}] [TOOLS] Error inesperado parseando JSON | "
+                f"type={type(e).__name__} msg={str(e)} start_idx={start_idx}"
+            )
+            return None, None, None, None
+
+        # Debe consumir todo el final salvo whitespace
+        if candidate[end:].strip():
+            return None, None, None, None
+
+        # ✅ Caso 1 (existente): wrapper {"tool_calls": ...}
+        if isinstance(obj, dict) and "tool_calls" in obj:
+            tool_calls = self._normalize_tool_calls(obj.get("tool_calls"), request_id)
+            if not tool_calls:
+                return None, None, None, None
+
+            json_raw = candidate[:end]
+            return tool_calls, start_idx, start_idx + end, json_raw
+
+        # ✅ Caso 2 (nuevo): tool call "suelto" al final
+        # Ej: {"type":"function_call","name":"exec_command","arguments":{...}}
+        if isinstance(obj, dict) and (obj.get("name") or obj.get("function")):
+            tool_calls = self._normalize_tool_calls(obj, request_id)
+            if not tool_calls:
+                return None, None, None, None
+
+            json_raw = candidate[:end]
+            logger.info(
+                f"🧪 [{request_id}] [TOOLS] extractor: tool_call JSON suelto detectado al final | "
+                f"normalized_count={len(tool_calls)} | json_len={len(json_raw)}"
+            )
+            return tool_calls, start_idx, start_idx + end, json_raw
+
+        return None, None, None, None
+
+    def _extract_tool_calls_from_plain_text_end(
+            self,
+            response_text: Optional[str],
+            request_id: str
+    ) -> tuple[Optional[list], str]:
+        if response_text is None:
+            logger.info(f"🧪 [{request_id}] [TOOLS] extractor: response_text=None")
+            return None, ""
+
+        text = str(response_text)
+
+        # Logs "antes"
+        tail_preview = text[-500:] if len(text) > 500 else text
+        logger.info(f"🧪 [{request_id}] [TOOLS] BEFORE extracted | len={len(text)} | tail_preview={tail_preview!r}")
+
+        trimmed = text.rstrip()
+        if not trimmed:
+            logger.info(f"🧪 [{request_id}] [TOOLS] extractor: trimmed vacío")
+            return None, ""
+
+        # NUEVO: Detectar y extraer JSON de bloques markdown ```json\n...\n```
+        import re
+        markdown_json_pattern = r'```json\s*\n(.*?)\n```'
+        markdown_match = re.search(markdown_json_pattern, trimmed, re.DOTALL)
+
+        if markdown_match:
+            json_content = markdown_match.group(1).strip()
+            markdown_start = markdown_match.start()
+            markdown_end = markdown_match.end()
+
+            logger.info(
+                f"🧪 [{request_id}] [TOOLS] Markdown JSON block detectado | "
+                f"Start: {markdown_start} | End: {markdown_end} | "
+                f"JSON length: {len(json_content)} chars"
+            )
+
+            # Intentar parsear el JSON extraído
+            try:
+                obj = json.loads(json_content)
+
+                # ✅ Soportar wrapper {"tool_calls": ...}
+                if isinstance(obj, dict) and "tool_calls" in obj:
+                    tool_calls = self._normalize_tool_calls(obj.get("tool_calls"), request_id)
+                    if tool_calls:
+                        cleaned = trimmed[:markdown_start].rstrip()
+                        after_tail = cleaned[-500:] if len(cleaned) > 500 else cleaned
+                        logger.info(
+                            f"🧪 [{request_id}] [TOOLS] AFTER extracted (from markdown) | "
+                            f"cleaned_len={len(cleaned)} | "
+                            f"tool_calls_count={len(tool_calls)} | "
+                            f"markdown_removed_len={markdown_end - markdown_start} | "
+                            f"cleaned_tail_preview={after_tail!r}"
+                        )
+                        return tool_calls, cleaned
+
+                # ✅ Soportar tool_call suelto en markdown
+                if isinstance(obj, dict) and (obj.get("name") or obj.get("function")):
+                    tool_calls = self._normalize_tool_calls(obj, request_id)
+                    if tool_calls:
+                        cleaned = trimmed[:markdown_start].rstrip()
+                        after_tail = cleaned[-500:] if len(cleaned) > 500 else cleaned
+                        logger.info(
+                            f"🧪 [{request_id}] [TOOLS] AFTER extracted (from markdown single tool_call) | "
+                            f"cleaned_len={len(cleaned)} | "
+                            f"tool_calls_count={len(tool_calls)} | "
+                            f"markdown_removed_len={markdown_end - markdown_start} | "
+                            f"cleaned_tail_preview={after_tail!r}"
+                        )
+                        return tool_calls, cleaned
+
+            except json.JSONDecodeError as e:
+                logger.warning(
+                    f"⚠️ [{request_id}] [TOOLS] Markdown JSON block inválido | "
+                    f"Error: {str(e)} | "
+                    f"Continuando con extracción normal..."
+                )
+
+        decoder = json.JSONDecoder()
+
+        # 1) Camino rápido: buscar el marcador {"tool_calls" desde el final
+        marker_idx = trimmed.rfind('{"tool_calls"')
+        if marker_idx != -1:
+            tool_calls, js, je, json_raw = self._try_parse_from(marker_idx, request_id, trimmed, decoder)
+            if tool_calls:
+                cleaned = trimmed[:js].rstrip()
+
+                # Logs "después" (AFTER)
+                after_tail = cleaned[-500:] if len(cleaned) > 500 else cleaned
+                logger.info(
+                    f"🧪 [{request_id}] [TOOLS] AFTER extracted | "
+                    f"cleaned_len={len(cleaned)} | "
+                    f"tool_calls_count={len(tool_calls)} | "
+                    f"json_removed_len={len(json_raw)} | "
+                    f"cleaned_tail_preview={after_tail!r}"
+                )
+
+                return tool_calls, cleaned
+            else:
+                # NUEVO: Log de diagnóstico cuando el marcador existe pero falla el parsing
+                logger.warning(
+                    f"⚠️ [{request_id}] [TOOLS] Marcador '{{\"tool_calls\"' encontrado en pos {marker_idx} pero parsing falló | "
+                    f"Snippet: {trimmed[marker_idx:marker_idx+100]!r}"
+                )
+
+        # 2) Fallback: escanear todos los '{' hacia atrás (evita caer en '{' dentro de strings)
+        brace_positions = [i for i, ch in enumerate(trimmed) if ch == "{"]
+
+        logger.info(f"🧪 [{request_id}] [TOOLS] fallback scan: brace_positions={len(brace_positions)}")
+
+        for start_idx in reversed(brace_positions):
+            tool_calls, js, je, json_raw = self._try_parse_from(start_idx, request_id, trimmed, decoder)
+            if tool_calls:
+                cleaned = trimmed[:js].rstrip()
+
+                after_tail = cleaned[-500:] if len(cleaned) > 500 else cleaned
+                logger.info(
+                    f"🧪 [{request_id}] [TOOLS] AFTER extracted | "
+                    f"cleaned_len={len(cleaned)} | "
+                    f"tool_calls_count={len(tool_calls)} | "
+                    f"json_removed_len={len(json_raw)} | "
+                    f"cleaned_tail_preview={after_tail!r}"
+                )
+
+                return tool_calls, cleaned
+
+        # 3) Multi-JSON: modelo emitió varios {"tool_calls"...} + texto inventado al final
+        EXAMPLE_MARKERS = (
+            "se vería", "por ejemplo", "el formato", "como este", "así:", "ejemplo:",
+            "sería así", "quedaría así", "como sigue", "a continuación", "siguiente forma",
+            "de esta forma", "de este modo", "como muestra", "ilustración",
+        )
+        INVENTED_RESULT_MARKERS = (
+            "- `", "**", "├", "└", "│", ".py`", ".java`", ".ts`", ".js`",
+            ".json`", ".yaml`", ".yml`", ".md`", ".txt`",
+        )
+        all_tool_calls = []
+        search_start = 0
+        first_json_pos = None
+        last_json_end = None
+
+        while True:
+            marker_pos = trimmed.find('{"tool_calls"', search_start)
+            if marker_pos == -1:
+                break
+            candidate = trimmed[marker_pos:]
+            try:
+                obj, end = decoder.raw_decode(candidate)
+            except Exception:
+                search_start = marker_pos + 1
+                continue
+
+            if isinstance(obj, dict) and "tool_calls" in obj:
+                tcs = self._normalize_tool_calls(obj.get("tool_calls"), request_id)
+                if tcs:
+                    if first_json_pos is None:
+                        first_json_pos = marker_pos
+                    last_json_end = marker_pos + end
+                    all_tool_calls.extend(tcs)
+            search_start = marker_pos + 1
+
+        if all_tool_calls and first_json_pos is not None:
+            text_before = trimmed[:first_json_pos].strip()
+            text_after = trimmed[last_json_end:].strip()
+
+            if text_before:
+                text_before_lower = text_before.lower()
+                is_example_intro = any(marker in text_before_lower for marker in EXAMPLE_MARKERS)
+                if is_example_intro:
+                    logger.info(
+                        f"🧪 [{request_id}] [TOOLS] multi-JSON descartado: texto antes contiene marcador de ejemplo | "
+                        f"text_before_preview={text_before[-200:]!r}"
+                    )
+                    return None, text
+
+            text_after_looks_invented = any(m in text_after for m in INVENTED_RESULT_MARKERS)
+            no_text_before = not text_before
+
+            if no_text_before or text_after_looks_invented:
+                logger.info(
+                    f"🧪 [{request_id}] [TOOLS] multi-JSON ejecutable detectado | "
+                    f"count={len(all_tool_calls)} | no_text_before={no_text_before} | "
+                    f"text_after_looks_invented={text_after_looks_invented} | "
+                    f"text_after_preview={text_after[:200]!r}"
+                )
+                return all_tool_calls, text_before
+
+            logger.info(
+                f"🧪 [{request_id}] [TOOLS] multi-JSON descartado: texto después no parece resultado inventado | "
+                f"text_after_preview={text_after[:200]!r}"
+            )
+
+        # No se encontró JSON tool_calls al final
+        logger.info(f"🧪 [{request_id}] [TOOLS] extractor: NO tool_calls JSON encontrado al final")
+        return None, text
 
     # ---------------- Síncrono ----------------
     def completion(self, messages=None, **kwargs) -> ModelResponse:
-        request_id = str(uuid.uuid4())[:8]  # Usar solo los primeros 8 caracteres para legibilidad
+        request_id = str(uuid.uuid4())[:8]
 
-        # Log detallado de kwargs solo si VERBOSE_LOGGING está activado
         if VERBOSE_LOGGING:
             logger.debug(f"⚙️ [{request_id}] kwargs recibidos en completion: {kwargs}")
 
         if not messages:
             raise ValueError("Se requiere al menos un mensaje")
 
-        # Extraer user_api_key si existe
         user_api_key = self._extract_user_api_key(kwargs, request_id)
-
-        # Extraer user-agent si existe
         user_agent = self._extract_user_agent(kwargs, request_id)
 
-        system, chat_messages = self._prepare_messages(messages, request_id)
+        # Tools (si vienen desde gateway/converter)
+        tools = kwargs.get("tools")
+        api = kwargs["api"]
+        # Omitir si es lista vacía
+        if tools is not None and isinstance(tools, list) and len(tools) == 0:
+            tools = None
+            logger.info(f"🔧 [{request_id}] [TOOLS] tools es lista vacía [] - omitiendo para evitar falsos positivos")
+        
+        # NUEVA LÓGICA: Detectar si hay mensajes con role="tool"
+        #has_tool_messages = any(msg.get("role") == "tool" for msg in messages if isinstance(msg, dict))
+        #if has_tool_messages and tools is not None:
+        #    logger.info(
+        #        f"🔧 [{request_id}] [TOOLS] Mensajes con role='tool' detectados | "
+        #        f"Acción: Eliminando tools de la entrada (se espera respuesta, no tool_calls)"
+        #    )
+        #    tools = None
+        
+        has_tools = bool(tools)  # Guardar si hay tools en la entrada
+        if has_tools:
+            print(f"[{request_id}] [TOOLS] completion(): tools recibidas count={len(tools)}")
 
-        if not messages:
-            raise ValueError("No hay mensajes para procesar después de extraer system prompt")
+        system, user_prompt, tool_call_id, chat_messages, type_prompt = self._prepare_messages(messages, request_id)
 
-        prompt = messages[-1]["content"]
         response_text, finish_reason, usage_data = self._call_sai(
-            system, prompt, chat_messages, request_id, user_api_key=user_api_key
+            system,
+            user_prompt,
+            tool_call_id,
+            chat_messages,
+            request_id,
+            type_prompt,
+            api,
+            user_api_key=user_api_key,
+            model=kwargs.get('model'),
+            tools=tools
         )
 
-        # Crear ModelResponse condicionalmente según user-agent
-        if user_agent and ('GitKraken' in user_agent or 'Go-http-client' in user_agent):
-            # GitKraken o Go-http-client detectado: NO asignar text, SÍ asignar message.content
-            client_type = "GitKraken" if "GitKraken" in user_agent else "Go-http-client"
+        # SOLO extraer tool_calls si se enviaron tools en la entrada
+        tool_calls = None
+        cleaned_text = response_text
+        
+        if has_tools:
+            tool_calls, cleaned_text = self._extract_tool_calls_from_plain_text_end(response_text, request_id)
+        else:
+            logger.info(f"🧪 [{request_id}] [TOOLS] completion(): NO tools en entrada -> extractor OMITIDO")
+
+        if tool_calls:
+            # Log para debug: imprimir tool_calls antes de retornar
+            logger.info(
+                f"🔍 [{request_id}] [DEBUG] tool_calls a retornar | "
+                f"Count: {len(tool_calls)} | "
+                f"Content: {json.dumps(tool_calls, indent=2, ensure_ascii=False)}"
+            )
+
             response = ModelResponse(
                 usage={
                     "prompt_tokens": usage_data["prompt_tokens"],
@@ -459,24 +848,36 @@ class SAILLM(CustomLLM):
                     "total_tokens": usage_data["total_tokens"]
                 }
             )
-            response.choices[0].message.content = response_text
+            # CORRECCIÓN: content debe ser None (null en JSON), no string vacío
+            response.choices[0].message.content = cleaned_text
+            response.choices[0].message.tool_calls = tool_calls
+            response.choices[0].finish_reason = "tool_calls"
+            response.model = usage_data["model"]
+            return response
+
+        # BUGFIX: Siempre asignar a message.content para compatibilidad con OpenAI Chat Completions
+        # Solo usar .text para casos legacy específicos
+        response = ModelResponse(
+            usage={
+                "prompt_tokens": usage_data["prompt_tokens"],
+                "completion_tokens": usage_data["completion_tokens"],
+                "total_tokens": usage_data["total_tokens"]
+            }
+        )
+        response.choices[0].message.content = cleaned_text
+        
+        # Para compatibilidad con clientes legacy que esperan .text
+        if not (user_agent and ('GitKraken' in user_agent or 'Go-http-client' in user_agent)):
+            response.text = cleaned_text
             logger.info(
-                f"✅ [{request_id}] [USER-AGENT] {client_type} detectado | "
-                f"NO se asigna text | SÍ se asigna response.choices[0].message.content"
+                f"✅ [{request_id}] [RESPONSE] Asignado a message.content Y text | "
+                f"Longitud: {len(cleaned_text)} chars"
             )
         else:
-            # GitKraken/Go-http-client NO detectado: SÍ asignar text, NO asignar message.content
-            response = ModelResponse(
-                text=response_text,
-                usage={
-                    "prompt_tokens": usage_data["prompt_tokens"],
-                    "completion_tokens": usage_data["completion_tokens"],
-                    "total_tokens": usage_data["total_tokens"]
-                }
-            )
             logger.info(
-                f"ℹ️ [{request_id}] [USER-AGENT] GitKraken/Go-http-client NO detectado | "
-                f"SÍ se asigna text | NO se asigna response.choices[0].message.content"
+                f"✅ [{request_id}] [RESPONSE] Asignado solo a message.content | "
+                f"User-Agent: {user_agent} | "
+                f"Longitud: {len(cleaned_text)} chars"
             )
 
         response.choices[0].finish_reason = finish_reason
@@ -485,48 +886,85 @@ class SAILLM(CustomLLM):
         return response
 
     # ---------------- Asíncrono ----------------
-    async def acompletion(self, messages=None, **kwargs) -> ModelResponse:
-        # Usar request_id de kwargs si existe (viene de astreaming), o generar uno nuevo
-        request_id = kwargs.pop('_request_id', None) or str(uuid.uuid4())[:8]
-
-        # Log detallado de kwargs solo si VERBOSE_LOGGING está activado
+    async def acompletion(self, request_id, messages=None, **kwargs) -> ModelResponse:
         if VERBOSE_LOGGING:
             logger.debug(f"⚙️ [{request_id}] kwargs recibidos en acompletion: {kwargs}")
 
         if not messages:
             raise ValueError("Se requiere al menos un mensaje")
 
-        # Extraer user_api_key si existe
         user_api_key = self._extract_user_api_key(kwargs, request_id)
-
-        # Extraer user-agent si existe
         user_agent = self._extract_user_agent(kwargs, request_id)
+        model = kwargs.get('model')
 
-        system, chat_messages = self._prepare_messages(messages, request_id)
+        tools = kwargs.get("tools")
+        # Omitir si es lista vacía
+        if tools is not None and isinstance(tools, list) and len(tools) == 0:
+            tools = None
+            logger.info(f"🔧 [{request_id}] [TOOLS] tools es lista vacía [] - omitiendo para evitar falsos positivos")
+        
+        # NUEVA LÓGICA: Detectar si hay mensajes con role="tool"
+        #has_tool_messages = any(msg.get("role") == "tool" for msg in messages if isinstance(msg, dict))
+        #if has_tool_messages and tools is not None:
+        #    logger.info(
+        #        f"🔧 [{request_id}] [TOOLS] Mensajes con role='tool' detectados | "
+        #        f"Acción: Eliminando tools de la entrada (se espera respuesta, no tool_calls)"
+        #    )
+        #    tools = None
+        
+        has_tools = bool(tools)  # Guardar si hay tools en la entrada
+        logger.info(f"🧪 [{request_id}] [TOOLS] acompletion(): tools_present={has_tools} tools_type={type(tools).__name__ if tools else 'None'}")
 
-        if not messages:
-            raise ValueError("No hay mensajes para procesar después de extraer system prompt")
+        system, user_prompt, tool_call_id, chat_messages, type_prompt = self._prepare_messages(messages, request_id)
 
-        prompt = messages[-1]["content"]
         loop = asyncio.get_running_loop()
 
-        # Crear una función parcial que incluya user_api_key
         from functools import partial
-        call_sai_with_key = partial(self._call_sai, user_api_key=user_api_key)
+        call_sai_with_params = partial(
+            self._call_sai, 
+            user_api_key=user_api_key, 
+            model=model, 
+            tools=tools,
+            type=type_prompt,
+            api=kwargs["api"]
+        )
 
         response_text, finish_reason, usage_data = await loop.run_in_executor(
             None,
-            call_sai_with_key,
+            call_sai_with_params,
             system,
-            prompt,
+            user_prompt,
+            tool_call_id,
             chat_messages,
             request_id
         )
 
-        # Crear ModelResponse condicionalmente según user-agent
-        if user_agent and ('GitKraken' in user_agent or 'Go-http-client' in user_agent):
-            # GitKraken o Go-http-client detectado: NO asignar text, SÍ asignar message.content
-            client_type = "GitKraken" if "GitKraken" in user_agent else "Go-http-client"
+        # Log explícito de llegada de respuesta
+        resp_tail = str(response_text)[-400:] if response_text else ""
+        logger.info(
+            f"🧪 [{request_id}] [TOOLS] acompletion(): response_text_len={len(str(response_text)) if response_text is not None else 0} "
+            f"resp_tail={resp_tail!r}"
+        )
+
+        # SOLO extraer tool_calls si se enviaron tools en la entrada
+        tool_calls = None
+        cleaned_text = response_text
+        
+        if has_tools:
+            tool_calls, cleaned_text = self._extract_tool_calls_from_plain_text_end(response_text, request_id)
+        else:
+            logger.info(f"🧪 [{request_id}] [TOOLS] acompletion(): NO tools en entrada -> extractor OMITIDO")
+
+        logger.info(f"🧪 [{request_id}] [TOOLS] acompletion(): extracted_tool_calls={bool(tool_calls)} cleaned_len={len(cleaned_text)}")
+
+        if tool_calls:
+            # Log para debug: imprimir tool_calls antes de retornar
+            logger.info(
+                f"🔍 [{request_id}] [DEBUG] tool_calls a retornar (async) | "
+                f"Count: {len(tool_calls)} | "
+                f"Content: {json.dumps(tool_calls, indent=2, ensure_ascii=False)}"
+            )
+
             response = ModelResponse(
                 usage={
                     "prompt_tokens": usage_data["prompt_tokens"],
@@ -534,68 +972,124 @@ class SAILLM(CustomLLM):
                     "total_tokens": usage_data["total_tokens"]
                 }
             )
-            response.choices[0].message.content = response_text
+            response.choices[0].message.content = cleaned_text  # ← Cambio aquí
+            response.choices[0].message.tool_calls = tool_calls
+            response.choices[0].finish_reason = "tool_calls"
+            response.model = usage_data["model"]
+
+            return response
+
+        # BUGFIX: Siempre asignar a message.content para compatibilidad con OpenAI Chat Completions
+        # Solo usar .text para casos legacy específicos
+        response = ModelResponse(
+            usage={
+                "prompt_tokens": usage_data["prompt_tokens"],
+                "completion_tokens": usage_data["completion_tokens"],
+                "total_tokens": usage_data["total_tokens"]
+            }
+        )
+        response.choices[0].message.content = cleaned_text
+        
+        # Para compatibilidad con clientes legacy que esperan .text
+        if not (user_agent and ('GitKraken' in user_agent or 'Go-http-client' in user_agent)):
+            response.text = cleaned_text
             logger.info(
-                f"✅ [{request_id}] [USER-AGENT] {client_type} detectado | "
-                f"NO se asigna text | SÍ se asigna response.choices[0].message.content"
+                f"✅ [{request_id}] [RESPONSE] Asignado a message.content Y text | "
+                f"Longitud: {len(cleaned_text)} chars"
             )
         else:
-            # GitKraken/Go-http-client NO detectado: SÍ asignar text, NO asignar message.content
-            response = ModelResponse(
-                text=response_text,
-                usage={
-                    "prompt_tokens": usage_data["prompt_tokens"],
-                    "completion_tokens": usage_data["completion_tokens"],
-                    "total_tokens": usage_data["total_tokens"]
-                }
-            )
             logger.info(
-                f"ℹ️ [{request_id}] [USER-AGENT] GitKraken/Go-http-client NO detectado | "
-                f"SÍ se asigna text | NO se asigna response.choices[0].message.content"
+                f"✅ [{request_id}] [RESPONSE] Asignado solo a message.content | "
+                f"User-Agent: {user_agent} | "
+                f"Longitud: {len(cleaned_text)} chars"
             )
 
         response.choices[0].finish_reason = finish_reason
         response.model = usage_data["model"]
-
         return response
 
     # ---------------- Streaming ----------------
-    async def astreaming(self, messages=None, **kwargs) -> AsyncIterator[GenericStreamingChunk]:
-        # Generar request_id siempre (independiente de VERBOSE_LOGGING)
-        request_id = str(uuid.uuid4())[:8]
-
+    async def astreaming(self, request_id, messages=None, **kwargs) -> AsyncIterator[GenericStreamingChunk]:
         # Log detallado de kwargs solo si VERBOSE_LOGGING está activado
         if VERBOSE_LOGGING:
             logger.debug(f"⚙️ [{request_id}] kwargs recibidos en astreaming: {kwargs}")
 
         # Pasar el request_id y todos los kwargs a acompletion
         kwargs['_request_id'] = request_id
-        response = await self.acompletion(messages, **kwargs)
-        text = response.text
+
+        response = await self.acompletion(request_id, messages, **kwargs)
+
+        # Extraer texto y tool_calls de la respuesta
+        text = None
+        tool_calls = None
+
+        if hasattr(response, 'choices') and response.choices:
+            choice = response.choices[0]
+
+            if hasattr(choice, 'message'):
+                if hasattr(choice.message, 'tool_calls') and choice.message.tool_calls:
+                    tool_calls = choice.message.tool_calls
+                    logger.info(
+                        f"🔧 [{request_id}] [STREAMING] Response contiene tool_calls | "
+                        f"Count: {len(tool_calls)}"
+                    )
+
+                if hasattr(choice.message, 'content') and choice.message.content:
+                    text = choice.message.content
+                    logger.info(f"choice.message.content: {bool(text)}")
+        elif hasattr(response, 'text') and response.text:
+            text = response.text
+            logger.info(f"response.text: {bool(text)}")
+
+        # Validar que haya al menos texto o tool_calls
+        if not text and not tool_calls:
+            logger.error(
+                f"❌ [{request_id}] [STREAMING] No se pudo extraer ni texto ni tool_calls de la respuesta | "
+                f"response.choices existe: {hasattr(response, 'choices')} | "
+                f"response.text existe: {hasattr(response, 'text')} | "
+                f"Tipo de response: {type(response).__name__}"
+            )
+            return
+
         usage_dict = response.usage.__dict__ if not isinstance(response.usage, dict) else response.usage
         finish_reason = response.choices[0].finish_reason
 
-        for idx, start in enumerate(range(0, len(text), CHUNK_SIZE)):
-            chunk_text = text[start:start + CHUNK_SIZE]
-            await asyncio.sleep(0.001)  # Reducido de 0.01s a 0.001s para mayor velocidad
-            is_final = start + CHUNK_SIZE >= len(text)
-            yield GenericStreamingChunk(
-                text=chunk_text,
-                index=idx,
-                is_finished=is_final,
-                finish_reason=finish_reason if is_final else None,
-                tool_use=None,
-                usage=usage_dict
-            )
+        # Convertir tool_calls a formato serializable (si aplica)
+        tool_calls_list = None
+        if tool_calls:
+            tool_calls_list = []
+            for tc in tool_calls:
+                if hasattr(tc, '__dict__'):
+                    tc_dict = {
+                        "id": getattr(tc, 'id', f"call_{request_id}"),
+                        "type": getattr(tc, 'type', 'function'),
+                        "function": {
+                            "name": getattr(tc.function, 'name', '') if hasattr(tc, 'function') else '',
+                            "arguments": getattr(tc.function, 'arguments', '{}') if hasattr(tc, 'function') else '{}'
+                        }
+                    }
+                else:
+                    tc_dict = tc
+                tool_calls_list.append(tc_dict)
+
+        # ✅ Emitir UN ÚNICO chunk que contenga texto + tool_use (si existen)
+        final_text = text or ""
+        logger.info(
+            f"🧩 [{request_id}] [STREAMING] Emitiendo chunk único | "
+            f"text_len={len(final_text)} | tool_calls={len(tool_calls_list) if tool_calls_list else 0}"
+        )
+
+        yield GenericStreamingChunk(
+            text=final_text,
+            index=0,
+            is_finished=True,
+            finish_reason=finish_reason,
+            tool_use=tool_calls_list,
+            usage=usage_dict
+        )
 
     # ---------------- Métodos auxiliares para reducir complejidad ----------------
     def _determine_auth_method(self, user_api_key: Optional[str], request_id: str) -> tuple[Optional[str], Optional[str], str]:
-        """
-        Determina el método de autenticación a usar.
-
-        Returns:
-            tuple: (custom_cookie, api_key_to_use, auth_type)
-        """
         custom_cookie = None
         api_key_to_use = None
 
@@ -616,12 +1110,6 @@ class SAILLM(CustomLLM):
     def _execute_request_with_retry(self, url: str, data: dict, custom_cookie: Optional[str], 
                                    api_key_to_use: Optional[str], user_api_key: Optional[str], 
                                    request_id: str) -> tuple[Optional[str], Optional[dict], str]:
-        """
-        Ejecuta el request con lógica de reintento.
-
-        Returns:
-            tuple: (response, response_headers, auth_method_used)
-        """
         response = None
         response_headers = None
         auth_method_used = None
@@ -714,14 +1202,8 @@ class SAILLM(CustomLLM):
                 "Si el problema persiste, contacte al administrador del sistema."
             )
 
-    def _handle_error_response(self, response: Optional[str], auth_method_used: str, 
+    def _handle_error_response(self, response: Optional[str], auth_method_used: str,
                                request_id: str, chat_messages: list, url: str) -> Optional[tuple[str, str, dict]]:
-        """
-        Maneja respuestas de error y retorna el mensaje apropiado.
-
-        Returns:
-            tuple o None: (error_message, finish_reason, usage_data) si hay error, None si no hay error
-        """
         usage_data = {
             "prompt_tokens": 0,
             "completion_tokens": 0,
@@ -826,7 +1308,7 @@ class SAILLM(CustomLLM):
         )
 
     # ---------------- Métodos auxiliares para _make_request ----------------
-    def _setup_request_headers(self, use_api_key: bool, custom_api_key: Optional[str], 
+    def _setup_request_headers(self, use_api_key: bool, custom_api_key: Optional[str],
                                custom_cookie: Optional[str], request_id: str) -> tuple[dict, str]:
         """
         Configura los headers de autenticación para la petición.
@@ -881,14 +1363,8 @@ class SAILLM(CustomLLM):
                 f"{data.get('chatMessages', [])}"
             )
 
-    def _execute_http_request(self, url: str, data: dict, headers: dict, 
+    def _execute_http_request(self, url: str, data: dict, headers: dict,
                              request_timeout: int, request_id: str):
-        """
-        Ejecuta la petición HTTP POST.
-
-        Returns:
-            requests.Response object
-        """
         start_time = time.time()
         logger.debug(f"[{request_id}] [HTTP] Iniciando petición POST a SAI...")
 
@@ -926,95 +1402,99 @@ class SAILLM(CustomLLM):
 
         return response_headers
 
-    def _handle_http_401_error(self, resp, auth_method: str, url: str, request_id: str) -> tuple[str, None]:
-        """Maneja errores HTTP 401 Unauthorized."""
+    def _handle_http_401_error(self, resp, auth_method: str, url: str, request_id: str) -> None:
+        """Maneja errores HTTP 401 Unauthorized lanzando SAIAuthenticationError."""
         logger.error(
             f"🔐 [{request_id}] [HTTP 401] Unauthorized | "
             f"Auth usado: {auth_method} | "
             f"Diagnóstico: Credencial rechazada por el servidor SAI | "
-            f"URL: {url} | "
-            f"Acción: Retornando UNAUTHORIZED_ERROR (no se reintentará)"
+            f"URL: {url}"
         )
-        return "UNAUTHORIZED_ERROR", None
+        error_message = self._build_auth_error_message(auth_method)
+        raise SAIAuthenticationError(error_message)
 
-    def _handle_http_429_error(self, resp, auth_method: str, request_id: str) -> tuple[Optional[str], None]:
-        """Maneja errores HTTP 429 Rate Limit."""
+    def _handle_http_429_error(self, resp, auth_method: str, request_id: str) -> None:
+        """Maneja errores HTTP 429 Rate Limit lanzando SAIRateLimitError."""
         response_text = resp.text if resp else ""
 
         if "Test template usage limit exceeded" in response_text:
             logger.warning(
                 f"⚠️ [{request_id}] [HTTP 429] Rate Limit - Test Template | "
                 f"Auth usado: {auth_method} | "
-                f"Diagnóstico: Límite de uso de template de prueba excedido | "
-                f"Acción: Retornando None para reintentar con Cookie si está disponible"
+                f"Diagnóstico: Límite de uso de template de prueba excedido"
             )
-            return None, None
         else:
             logger.error(
                 f"❌ [{request_id}] [HTTP 429] Rate Limit - Otro tipo | "
                 f"Auth usado: {auth_method} | "
-                f"Respuesta del servidor: {response_text[:200]} | "
-                f"Acción: Retornando None (sin reintento)"
+                f"Respuesta del servidor: {response_text[:200]}"
             )
-            return None, None
 
-    def _handle_http_500_error(self, resp, auth_method: str, request_id: str) -> tuple[str, None]:
-        """Maneja errores HTTP 500 Internal Server Error."""
+        raise SAIRateLimitError("Se ha excedido el límite de uso de la API de SAI.")
+
+    def _handle_http_500_error(self, resp, auth_method: str, request_id: str) -> None:
+        """Maneja errores HTTP 500 Internal Server Error lanzando excepciones específicas."""
         response_text = resp.text if resp else ""
+        lower_text = response_text.lower()
 
-        if "prompt is too long" in response_text.lower() or "openaicompatible" in response_text.lower():
+        if "prompt is too long" in lower_text or "openaicompatible" in lower_text:
             logger.warning(
                 f"⚠️ [{request_id}] [HTTP 500] Prompt Too Long | "
                 f"Auth usado: {auth_method} | "
                 f"Diagnóstico: El contexto excede el límite del modelo | "
-                f"Respuesta SAI (preview): {response_text[:200]} | "
-                f"Acción: Retornando PROMPT_TOO_LONG (finish_reason=length)"
+                f"Respuesta SAI (preview): {response_text[:200]}"
             )
-            return "PROMPT_TOO_LONG", None
-        else:
-            logger.error(
-                f"❌ [{request_id}] [HTTP 500] Internal Server Error | "
-                f"Auth usado: {auth_method} | "
-                f"Diagnóstico: Error interno del servidor SAI (no relacionado con tamaño de prompt) | "
-                f"Respuesta SAI (preview): {response_text[:200]} | "
-                f"Acción: Retornando HTTP_500_ERROR (finish_reason=error)"
+            raise SAIPromptTooLongError(
+                "El contexto o historial enviado a SAI excede el límite soportado por el modelo."
             )
-            return "HTTP_500_ERROR", None
 
-    def _handle_other_http_errors(self, resp, auth_method: str, url: str, e: Exception, request_id: str) -> tuple[None, None]:
-        """Maneja otros errores HTTP no específicos."""
+        logger.error(
+            f"❌ [{request_id}] [HTTP 500] Internal Server Error | "
+            f"Auth usado: {auth_method} | "
+            f"Diagnóstico: Error interno del servidor SAI (no relacionado con tamaño de prompt) | "
+            f"Respuesta SAI (preview): {response_text[:200]}"
+        )
+        raise SAIServerError(
+            "Error interno del servidor SAI al procesar la solicitud."
+        )
+
+    def _handle_other_http_errors(self, resp, auth_method: str, url: str, e: Exception, request_id: str) -> None:
+        """Maneja otros errores HTTP no específicos lanzando SAIAPIError."""
         status_code = resp.status_code if resp else "N/A"
         response_text = resp.text[:200] if resp else ""
 
         logger.error(
-            f"❌ [{request_id}] [HTTP {status_code}] Error no manejado específicamente | "
+            f"❌ [{request_id}] [HTTP {status_code}] Error HTTP no manejado específicamente | "
             f"Auth usado: {auth_method} | "
             f"URL: {url} | "
             f"Exception: {type(e).__name__}: {str(e)} | "
-            f"Respuesta del servidor: {response_text} | "
-            f"Acción: Retornando None"
+            f"Respuesta del servidor: {response_text}"
         )
-        return None, None
+        raise SAIAPIError(
+            f"Error HTTP {status_code} al llamar a SAI: {response_text}"
+        )
 
-    def _handle_request_exceptions(self, e: Exception, resp, auth_method: str, url: str, 
-                                   request_timeout: int, request_id: str) -> tuple[Optional[str], Optional[dict]]:
-        """
-        Maneja todas las excepciones que pueden ocurrir durante una petición HTTP.
-
-        Returns:
-            tuple: (response_text, response_headers) o (None, None) en caso de error
-        """
+    def _handle_request_exceptions(
+        self,
+        e: Exception,
+        resp,
+        auth_method: str,
+        url: str,
+        request_timeout: int,
+        request_id: str,
+    ) -> None:
+        """Traduce excepciones de requests a excepciones de dominio SAI."""
         if isinstance(e, requests.HTTPError):
             if resp is not None and resp.status_code == 401:
-                return self._handle_http_401_error(resp, auth_method, url, request_id)
+                self._handle_http_401_error(resp, auth_method, url, request_id)
 
             if resp is not None and resp.status_code == 429:
-                return self._handle_http_429_error(resp, auth_method, request_id)
+                self._handle_http_429_error(resp, auth_method, request_id)
 
             if resp is not None and resp.status_code == 500:
-                return self._handle_http_500_error(resp, auth_method, request_id)
+                self._handle_http_500_error(resp, auth_method, request_id)
 
-            return self._handle_other_http_errors(resp, auth_method, url, e, request_id)
+            self._handle_other_http_errors(resp, auth_method, url, e, request_id)
 
         elif isinstance(e, requests.Timeout):
             logger.error(
@@ -1022,10 +1502,11 @@ class SAILLM(CustomLLM):
                 f"Timeout configurado: {request_timeout}s | "
                 f"Auth usado: {auth_method} | "
                 f"URL: {url} | "
-                f"Diagnóstico: El servidor SAI no respondió en el tiempo esperado | "
-                f"Acción: Retornando None"
+                f"Diagnóstico: El servidor SAI no respondió en el tiempo esperado"
             )
-            return None, None
+            raise SAITimeoutError(
+                f"Timeout al llamar a SAI tras {request_timeout} segundos."
+            )
 
         elif isinstance(e, requests.RequestException):
             logger.error(
@@ -1033,19 +1514,73 @@ class SAILLM(CustomLLM):
                 f"Auth usado: {auth_method} | "
                 f"URL: {url} | "
                 f"Exception: {type(e).__name__}: {str(e)} | "
-                f"Diagnóstico: Problema de red o conectividad con SAI | "
-                f"Acción: Retornando None"
+                f"Diagnóstico: Problema de red o conectividad con SAI"
             )
-            return None, None
+            raise SAIConnectionError(
+                f"Error de red al intentar conectar con SAI: {type(e).__name__}: {str(e)}"
+            )
 
-        return None, None
+        else:
+            logger.error(
+                f"❌ [{request_id}] [ERROR] Excepción inesperada al llamar a SAI | "
+                f"Tipo: {type(e).__name__}: {str(e)}"
+            )
+            raise SAIAPIError(str(e))
 
     # ---------------- Llamada privada a SAI (refactorizada) ----------------
-    def _call_sai(self, system: str, user: str, chat_messages: list, request_id: str, user_api_key: Optional[str] = None) -> tuple[str, str, dict]:
+    def _call_sai(self, system: str, user: str, tool_call_id: Optional[str],
+                  chat_messages: list, request_id: str, type: str, api: str,
+                  user_api_key: Optional[str] = None, model: Optional[str] = None, 
+                  tools: Optional = None) -> tuple[str, str, dict]:
+        # Construir URL base
         url = f"{SAI_URL}/api/templates/{SAI_TEMPLATE_ID}/execute"
-        data = {"inputs":{"system":system,"user":user}}
+
+        # Agregar modelOverride si se proporciona un modelo
+        if model:
+            url = f"{url}?modelOverride={model}"
+            logger.info(
+                f"🎯 [{request_id}] [MODEL] Model override aplicado | "
+                f"Modelo solicitado: {model} | "
+                f"URL: {url}"
+            )
+
+        # Construir inputs con system, user, tool y tools
+        data = {
+            "inputs": {
+                "system": system,
+                "user": user,
+                "tools": None,  # tools definitions (se llenará después)
+                "type": type,
+                "api": api
+            }
+        }
+        
         if chat_messages:
             data["chatMessages"] = chat_messages
+
+        # Serializar tools definitions como JSON string
+        tools_json_str = None
+        if tools is None:
+            tools_json_str = None
+            logger.debug(f"[{request_id}] [TOOLS] _call_sai(): tools=None -> inputs.tools=None")
+        elif isinstance(tools, list) and len(tools) == 0:
+            tools_json_str = None
+            logger.info(f"🔧 [{request_id}] [TOOLS] _call_sai(): tools=[] (lista vacía) -> inputs.tools=None (omitido)")
+        elif isinstance(tools, str):
+            tools_json_str = tools
+            try:
+                json.loads(tools_json_str)
+                logger.debug(f"[{request_id}] [TOOLS] _call_sai(): tools ya es JSON string válido (len={len(tools_json_str)})")
+            except Exception as e:
+                logger.warning(f"⚠️ [{request_id}] [TOOLS] _call_sai(): WARNING tools es string pero NO es JSON válido: {type(e).__name__}: {str(e)}")
+        else:
+            tools_json_str = json.dumps(tools, ensure_ascii=False)
+            logger.debug(f"[{request_id}] [TOOLS] _call_sai(): tools serializadas a JSON string (len={len(tools_json_str)})")
+
+        data["inputs"]["tools"] = tools_json_str
+
+        if tools_json_str and VERBOSE_LOGGING:
+            logger.debug(f"[{request_id}] [TOOLS] inputs.tools preview={tools_json_str[:180]!r}")
 
         # Determinar método de autenticación
         custom_cookie, api_key_to_use, auth_type = self._determine_auth_method(user_api_key, request_id)
@@ -1062,17 +1597,12 @@ class SAILLM(CustomLLM):
             )
 
         if VERBOSE_LOGGING:
-            logger.debug(f"[{request_id}] Payload completo:\n{data}")
+            logger.debug(f"[{request_id}] Payload completo:\n{json.dumps(data, indent=2, ensure_ascii=False)}")
 
-        # Ejecutar request con reintentos
+        # Ejecutar request con reintentos (puede lanzar SAI*Error en caso de fallo)
         response, response_headers, auth_method_used = self._execute_request_with_retry(
             url, data, custom_cookie, api_key_to_use, user_api_key, request_id
         )
-
-        # Manejar errores
-        error_result = self._handle_error_response(response, auth_method_used, request_id, chat_messages, url)
-        if error_result:
-            return error_result
 
         # Actualizar datos de uso
         usage_data = self._update_usage_data(response_headers)
@@ -1111,11 +1641,16 @@ class SAILLM(CustomLLM):
             return resp.text, response_headers
 
         except requests.RequestException as e:
-            return self._handle_request_exceptions(e, resp, auth_method, url, request_timeout, request_id)
+            # Traducir y relanzar como excepción de dominio
+            self._handle_request_exceptions(e, resp, auth_method, url, request_timeout, request_id)
+            # La línea siguiente no debería alcanzarse nunca, pero se deja por claridad tipada.
+            raise
 
 
-# ---------------- Instancia ----------------
+# ---------------- Instancia global ----------------
 sai_llm = SAILLM()
+"""Instancia global de SAILLM lista para usar."""
+
 logger.info(
     f"✅ SAILLM inicializado correctamente | "
     f"Clase: {sai_llm.__class__.__name__} | "

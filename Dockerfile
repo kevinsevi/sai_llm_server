@@ -16,12 +16,26 @@ RUN apt-get update && \
 # Carpeta de trabajo
 WORKDIR /app
 
-# Instalar litellm con extras proxy y requests
-RUN pip install --no-cache-dir "litellm[proxy]" requests
+# Instalar dependencias
+RUN pip install --no-cache-dir \
+    fastapi \
+    "uvicorn[standard]" \
+    starlette \
+    requests \
+    python-dotenv \
+    litellm
 
-# Copiar archivos
-COPY sai_handler.py .
-COPY config.yaml .
+# Copiar el código (todas las clases sai_*.py)
+COPY sai_*.py ./
 
-# CMD para iniciar litellm con tu config
-CMD ["litellm", "--config", "config.yaml"]
+# Copiar los archivos de system prompts
+COPY system_prompt_*.txt ./
+
+# (Opcional) si aún usas config.yaml para otra cosa, mantenlo; si no, puedes borrarlo
+COPY config.yaml ./
+
+# Puerto del servicio
+EXPOSE 4000
+
+# Arrancar el gateway
+CMD ["uvicorn", "sai_gateway:app", "--host", "0.0.0.0", "--port", "4000"]

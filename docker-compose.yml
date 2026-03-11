@@ -1,6 +1,6 @@
 services:
   sai_llm:
-    image: cobistopaz/sai_llm_server
+    image: cobistopaz/sai_llm_server:2.0.0
     pull_policy: always
     ports:
       - "4000:4000"

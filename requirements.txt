@@ -1,0 +1,14 @@
+# Core dependencies
+fastapi>=0.109.0
+uvicorn[standard]>=0.27.0
+python-dotenv>=1.0.0
+requests>=2.31.0
+
+# For streaming support
+sseclient-py>=1.8.0
+
+# Already required by your sai_handler_llm.py
+litellm>=1.30.0
+
+# Optional: for production deployment
+gunicorn>=21.2.0
