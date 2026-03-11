@@ -14,6 +14,7 @@ from sai_exceptions import (
     SAIAuthenticationError,
     SAIRateLimitError,
     SAIPromptTooLongError,
+    SAIUpstreamInvalidResponseError,
 )
 
 class ResponsesHandler:
@@ -55,7 +56,27 @@ class ResponsesHandler:
         # Timestamp de inicio
         created_at = int(time.time())
 
-        litellm_response = await sai_llm.acompletion(request_id, messages=messages, **kwargs)
+        try:
+            litellm_response = await sai_llm.acompletion(request_id, messages=messages, **kwargs)
+        except SAIUpstreamInvalidResponseError as e:
+            logger.error(
+                f"❌ [{request_id}] Upstream inválido en /v1/responses (non-streaming) | "
+                f"{type(e).__name__}: {str(e)}"
+            )
+            error_body = {
+                "error": {
+                    "message": str(e),
+                    "type": "upstream_invalid_response",
+                    "exception": e.exception_type or type(e).__name__,
+                    "upstream_preview": getattr(e, "upstream_preview", ""),
+                }
+            }
+            return Response(
+                content=json.dumps(error_body, indent=2, ensure_ascii=False) + "\n",
+                status_code=502,
+                media_type="application/json",
+                headers={"Content-Type": "application/json; charset=utf-8"},
+            )
 
         # Timestamp de finalización
         completed_at = int(time.time())

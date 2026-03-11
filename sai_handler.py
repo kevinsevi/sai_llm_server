@@ -20,6 +20,7 @@ from sai_exceptions import (
     SAIServerError,
     SAIConnectionError,
     SAITimeoutError,
+    SAIUpstreamInvalidResponseError,
 )
 
 # Cargar variables de entorno
@@ -682,6 +683,17 @@ class SAILLM(CustomLLM):
                 logger.warning(
                     f"⚠️ [{request_id}] [TOOLS] Marcador '{{\"tool_calls\"' encontrado en pos {marker_idx} pero parsing falló | "
                     f"Snippet: {trimmed[marker_idx:marker_idx+100]!r}"
+                )
+
+                # FAIL-FAST: si el upstream intentó devolver tool_calls pero el JSON es inválido,
+                # no reenviar el JSON crudo como texto (rompe clientes) y no reintentar.
+                upstream_preview = trimmed[marker_idx:]
+                if len(upstream_preview) > 2000:
+                    upstream_preview = upstream_preview[:2000] + "..."
+                raise SAIUpstreamInvalidResponseError(
+                    "Upstream devolvió tool_calls con JSON inválido (no parseable).",
+                    upstream_preview=upstream_preview,
+                    exception="JSONDecodeError"
                 )
 
         # 2) Fallback: escanear todos los '{' hacia atrás (evita caer en '{' dentro de strings)
