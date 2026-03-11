@@ -101,6 +101,8 @@ async def completions_endpoint(request: Request):
             kwargs["headers"] = {"user_api_key": user_api_key}
             logger.info(f"🔑 [{request_id}] user_api_key detectada")
 
+        kwargs["api"] = "chat"
+
         # Decidir si es streaming o no
         if stream:
             logger.info(f"🌊 [{request_id}] Modo streaming activado")
