@@ -238,34 +238,14 @@ class ResponsesHandler:
                 # 🔧 Enriquecer tools: agregar apply_patch dentro de kwargs["tools"]
                 # (sin pisar los tools existentes y evitando duplicados)
                 apply_patch_tool = {
-                    "type": "custom_tool_call",
-                    "name": "apply_patch",
                     "description": "Use the `apply_patch` tool to edit files. This is a FREEFORM tool, so do not wrap the patch in JSON.",
                     "format": {
-                        "type": "grammar",
+                        "definition": "start: begin_patch hunk+ end_patch\nbegin_patch: \"*** Begin Patch\" LF\nend_patch: \"*** End Patch\" LF?\n\nhunk: add_hunk | delete_hunk | update_hunk\nadd_hunk: \"*** Add File: \" filename LF add_line+\ndelete_hunk: \"*** Delete File: \" filename LF\nupdate_hunk: \"*** Update File: \" filename LF change_move? change?\n\nfilename: /(.+)/\nadd_line: \"+\" /(.*)/ LF -> line\n\nchange_move: \"*** Move to: \" filename LF\nchange: (change_context | change_line)+ eof_line?\nchange_context: (\"@@\" | \"@@ \" /(.+)/) LF\nchange_line: (\"+\" | \"-\" | \" \") /(.*)/ LF\neof_line: \"*** End of File\" LF\n\n%import common.LF\n",
                         "syntax": "lark",
-                        "definition": (
-                            "start: begin_patch hunk+ end_patch\n"
-                            "begin_patch: \"*** Begin Patch\" LF\n"
-                            "end_patch: \"*** End Patch\" LF?\n"
-                            "\n"
-                            "hunk: add_hunk | delete_hunk | update_hunk\n"
-                            "add_hunk: \"*** Add File: \" filename LF add_line+\n"
-                            "delete_hunk: \"*** Delete File: \" filename LF\n"
-                            "update_hunk: \"*** Update File: \" filename LF change_move? change?\n"
-                            "\n"
-                            "filename: /(.+)/\n"
-                            "add_line: \"+\" /(.*)/ LF -> line\n"
-                            "\n"
-                            "change_move: \"*** Move to: \" filename LF\n"
-                            "change: (change_context | change_line)+ eof_line?\n"
-                            "change_context: (\"@@\" | \"@@ \" /(.+)/) LF\n"
-                            "change_line: (\"+\" | \"-\" | \" \") /(.*)/ LF\n"
-                            "eof_line: \"*** End of File\" LF\n"
-                            "\n"
-                            "%import common.LF\n"
-                        )
-                    }
+                        "type": "grammar"
+                    },
+                    "name": "apply_patch",
+                    "type": "custom"
                 }
 
                 tools = kwargs.get("tools")
@@ -279,14 +259,14 @@ class ResponsesHandler:
                     tools = [tools]
                     kwargs["tools"] = tools
 
-                existing_tool_names = set()
+                # Evitar duplicados: solo agregar si NO existe un tool con name="apply_patch" y type="custom"
+                has_apply_patch_custom = False
                 for t in tools:
-                    if isinstance(t, dict):
-                        name = t.get("name")
-                        if name:
-                            existing_tool_names.add(name)
+                    if isinstance(t, dict) and t.get("name") == "apply_patch" and t.get("type") == "custom":
+                        has_apply_patch_custom = True
+                        break
 
-                if "apply_patch" not in existing_tool_names:
+                if not has_apply_patch_custom:
                     tools.append(apply_patch_tool)
                     logger.info(f"🧩 [{request_id}] Tool 'apply_patch' agregado a kwargs['tools'] (total={len(tools)})")
 
