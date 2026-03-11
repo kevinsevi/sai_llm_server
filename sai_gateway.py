@@ -17,6 +17,9 @@ from sai_exceptions import (
     SAIAuthenticationError,
     SAIRateLimitError,
     SAIPromptTooLongError,
+    SAIServerError,
+    SAIConnectionError,
+    SAITimeoutError,
 )
 
 app = FastAPI(title="OpenAI SAI Gateway", version="2.0.0")
@@ -115,6 +118,15 @@ async def completions_endpoint(request: Request):
     except SAIPromptTooLongError as e:
         logger.error(f"⚠️ [{request_id}] Prompt demasiado largo en /v1/completions: {e}")
         raise HTTPException(status_code=400, detail=str(e))
+    except SAIServerError as e:
+        logger.error(f"❌ [{request_id}] Error interno SAI (500) en /v1/completions: {e}")
+        raise HTTPException(status_code=502, detail=str(e))
+    except SAITimeoutError as e:
+        logger.error(f"⏱️ [{request_id}] Timeout en /v1/completions: {e}")
+        raise HTTPException(status_code=504, detail=str(e))
+    except SAIConnectionError as e:
+        logger.error(f"🔌 [{request_id}] Error de conexión en /v1/completions: {e}")
+        raise HTTPException(status_code=503, detail=str(e))
     except SAIAPIError as e:
         logger.error(f"❌ [{request_id}] Error SAI en /v1/completions: {e}")
         raise HTTPException(status_code=502, detail=str(e))
@@ -209,6 +221,15 @@ async def chat_completions_endpoint(request: Request):
     except SAIPromptTooLongError as e:
         logger.error(f"⚠️ [{request_id}] Prompt demasiado largo en /v1/chat/completions: {e}")
         raise HTTPException(status_code=400, detail=str(e))
+    except SAIServerError as e:
+        logger.error(f"❌ [{request_id}] Error interno SAI (500) en /v1/chat/completions: {e}")
+        raise HTTPException(status_code=502, detail=str(e))
+    except SAITimeoutError as e:
+        logger.error(f"⏱️ [{request_id}] Timeout en /v1/chat/completions: {e}")
+        raise HTTPException(status_code=504, detail=str(e))
+    except SAIConnectionError as e:
+        logger.error(f"🔌 [{request_id}] Error de conexión en /v1/chat/completions: {e}")
+        raise HTTPException(status_code=503, detail=str(e))
     except SAIAPIError as e:
         logger.error(f"❌ [{request_id}] Error SAI en /v1/chat/completions: {e}")
         raise HTTPException(status_code=502, detail=str(e))
@@ -306,6 +327,15 @@ async def messages_endpoint(request: Request):
     except SAIPromptTooLongError as e:
         logger.error(f"⚠️ [{request_id}] Prompt demasiado largo en /v1/messages: {e}")
         raise HTTPException(status_code=400, detail=str(e))
+    except SAIServerError as e:
+        logger.error(f"❌ [{request_id}] Error interno SAI (500) en /v1/messages: {e}")
+        raise HTTPException(status_code=502, detail=str(e))
+    except SAITimeoutError as e:
+        logger.error(f"⏱️ [{request_id}] Timeout en /v1/messages: {e}")
+        raise HTTPException(status_code=504, detail=str(e))
+    except SAIConnectionError as e:
+        logger.error(f"🔌 [{request_id}] Error de conexión en /v1/messages: {e}")
+        raise HTTPException(status_code=503, detail=str(e))
     except SAIAPIError as e:
         logger.error(f"❌ [{request_id}] Error SAI en /v1/messages: {e}")
         raise HTTPException(status_code=502, detail=str(e))
@@ -399,6 +429,15 @@ async def responses_endpoint(request: Request):
     except SAIPromptTooLongError as e:
         logger.error(f"⚠️ [{request_id}] Prompt demasiado largo en /v1/responses: {e}")
         raise HTTPException(status_code=400, detail=str(e))
+    except SAIServerError as e:
+        logger.error(f"❌ [{request_id}] Error interno SAI (500) en /v1/responses: {e}")
+        raise HTTPException(status_code=502, detail=str(e))
+    except SAITimeoutError as e:
+        logger.error(f"⏱️ [{request_id}] Timeout en /v1/responses: {e}")
+        raise HTTPException(status_code=504, detail=str(e))
+    except SAIConnectionError as e:
+        logger.error(f"🔌 [{request_id}] Error de conexión en /v1/responses: {e}")
+        raise HTTPException(status_code=503, detail=str(e))
     except SAIAPIError as e:
         logger.error(f"❌ [{request_id}] Error SAI en /v1/responses: {e}")
         raise HTTPException(status_code=502, detail=str(e))
