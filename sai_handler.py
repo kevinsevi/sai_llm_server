@@ -557,6 +557,13 @@ class SAILLM(CustomLLM):
 
         # ✅ Caso 1 (existente): wrapper {"tool_calls": ...}
         if isinstance(obj, dict) and "tool_calls" in obj:
+            # Aceptar tool_calls sin campo "type" (algunos modelos lo omiten)
+            # Ej: {"tool_calls":[{"function":{"name":"bash","arguments":{...}}}]}
+            if isinstance(obj.get("tool_calls"), list):
+                for tc in obj["tool_calls"]:
+                    if isinstance(tc, dict) and "type" not in tc and "function" in tc:
+                        tc["type"] = "function_call"
+
             tool_calls = self._normalize_tool_calls(obj.get("tool_calls"), request_id)
             if not tool_calls:
                 return None, None, None, None
