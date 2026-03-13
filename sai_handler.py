@@ -35,27 +35,33 @@ file_handler = RotatingFileHandler(
     filename=os.path.join(log_dir, "sai_handler.log"),
     maxBytes=5 * 1024 * 1024,
     backupCount=3,
-    encoding='utf-8'
+    encoding="utf-8",
 )
-file_handler.setFormatter(logging.Formatter('[%(asctime)s] %(levelname)s - %(message)s'))
+file_handler.setFormatter(
+    logging.Formatter("[%(asctime)s] %(levelname)s - %(message)s")
+)
 logger.addHandler(file_handler)
 
 console_handler = logging.StreamHandler()
 console_handler.setLevel(logging.WARNING)
-console_handler.setFormatter(logging.Formatter('[%(asctime)s] %(levelname)s - %(message)s'))
+console_handler.setFormatter(
+    logging.Formatter("[%(asctime)s] %(levelname)s - %(message)s")
+)
 logger.addHandler(console_handler)
 
 SAI_TEMPLATE_ID = os.getenv("SAI_TEMPLATE_ID")
 SAI_URL = os.getenv("SAI_URL")
 
+
 def get_secret(env_var):
     value = os.getenv(env_var)
-    if value and value.startswith('/run/secrets/'):
-        with open(value, 'r') as f:
+    if value and value.startswith("/run/secrets/"):
+        with open(value, "r") as f:
             return f.read().strip()
     return value
 
-SAI_COOKIE = get_secret('SAI_COOKIE')
+
+SAI_COOKIE = get_secret("SAI_COOKIE")
 SAI_KEY = get_secret("SAI_KEY")
 
 # Validar variables de entorno críticas
@@ -64,7 +70,9 @@ if not SAI_TEMPLATE_ID:
     logger.critical(f"❌ INICIALIZACIÓN FALLIDA: {error_msg}")
     raise ValueError(error_msg)
 if not SAI_KEY and not SAI_COOKIE:
-    error_msg = "Debe configurar al menos SAI_KEY o SAI_COOKIE en las variables de entorno"
+    error_msg = (
+        "Debe configurar al menos SAI_KEY o SAI_COOKIE en las variables de entorno"
+    )
     logger.critical(f"❌ INICIALIZACIÓN FALLIDA: {error_msg}")
     raise ValueError(error_msg)
 
@@ -79,7 +87,9 @@ if VERBOSE_LOGGING:
     logger.info("🔍 VERBOSE_LOGGING activado - Se mostrarán logs detallados de DEBUG")
 else:
     logger.setLevel(logging.INFO)
-    logger.info("📊 Logging en modo INFO - Use VERBOSE_LOGGING=true para logs detallados")
+    logger.info(
+        "📊 Logging en modo INFO - Use VERBOSE_LOGGING=true para logs detallados"
+    )
 
 # Log de configuración inicial
 logger.info(
@@ -98,43 +108,48 @@ http_session.timeout = REQUEST_TIMEOUT
 adapter = requests.adapters.HTTPAdapter(
     max_retries=MAX_RETRIES,
     pool_connections=10,  # Mantener más conexiones en pool
-    pool_maxsize=20       # Tamaño máximo del pool
+    pool_maxsize=20,  # Tamaño máximo del pool
 )
 http_session.mount("https://", adapter)
 http_session.mount("http://", adapter)
+
 
 class SAILLM(CustomLLM):
     def __init__(self):
         """Inicializa la instancia de SAILLM."""
         super().__init__()
 
-    def _extract_from_litellm_params(self, kwargs: dict) -> tuple[Optional[str], Optional[str]]:
+    def _extract_from_litellm_params(
+        self, kwargs: dict
+    ) -> tuple[Optional[str], Optional[str]]:
         """
         Extrae la API key desde litellm_params['metadata']['user_api_key'].
 
         Returns:
             tuple[Optional[str], Optional[str]]: (api_key, source)
         """
-        litellm_params = kwargs.get('litellm_params', {})
+        litellm_params = kwargs.get("litellm_params", {})
         if not isinstance(litellm_params, dict):
             return None, None
 
-        metadata = litellm_params.get('metadata', {})
+        metadata = litellm_params.get("metadata", {})
         if not isinstance(metadata, dict):
             return None, None
 
-        user_api_key = metadata.get('user_api_key', '')
+        user_api_key = metadata.get("user_api_key", "")
         if user_api_key:
             return user_api_key, "litellm_params.metadata"
 
         return None, None
 
-    def _extract_from_headers(self, kwargs: dict) -> tuple[Optional[str], Optional[str]]:
-        headers = kwargs.get('headers', {})
+    def _extract_from_headers(
+        self, kwargs: dict
+    ) -> tuple[Optional[str], Optional[str]]:
+        headers = kwargs.get("headers", {})
         if not isinstance(headers, dict):
             return None, None
 
-        user_api_key = headers.get('user_api_key', '')
+        user_api_key = headers.get("user_api_key", "")
         if user_api_key:
             return user_api_key, "headers"
 
@@ -173,7 +188,11 @@ class SAILLM(CustomLLM):
             if not self._is_valid_api_key(user_api_key):
                 if VERBOSE_LOGGING:
                     trimmed = str(user_api_key).strip()
-                    reason = "valor vacío" if not trimmed else "valor 'raspberry' (placeholder)"
+                    reason = (
+                        "valor vacío"
+                        if not trimmed
+                        else "valor 'raspberry' (placeholder)"
+                    )
                     logger.debug(
                         f"[{request_id}] [AUTH] user_api_key RECHAZADA | "
                         f"Fuente: {source} | "
@@ -202,23 +221,22 @@ class SAILLM(CustomLLM):
 
     def _extract_user_agent(self, kwargs: dict, request_id: str) -> Optional[str]:
         try:
-            litellm_params = kwargs.get('litellm_params', {})
+            litellm_params = kwargs.get("litellm_params", {})
             if not isinstance(litellm_params, dict):
                 return None
 
-            metadata = litellm_params.get('metadata', {})
+            metadata = litellm_params.get("metadata", {})
             if not isinstance(metadata, dict):
                 return None
 
-            headers = metadata.get('headers', {})
+            headers = metadata.get("headers", {})
             if not isinstance(headers, dict):
                 return None
 
-            user_agent = headers.get('user-agent', '')
+            user_agent = headers.get("user-agent", "")
             if user_agent:
                 logger.info(
-                    f"🌐 [{request_id}] [USER-AGENT] Detectado | "
-                    f"Valor: {user_agent}"
+                    f"🌐 [{request_id}] [USER-AGENT] Detectado | Valor: {user_agent}"
                 )
                 return user_agent
 
@@ -237,7 +255,7 @@ class SAILLM(CustomLLM):
 
         # Detectar el patrón del plugin
         plugin_prefix = "Determine if the following context is required to solve the task in the user's input in the chat session: \""
-        plugin_suffix_start = "\"\nContext:"
+        plugin_suffix_start = '"\nContext:'
 
         if content.startswith(plugin_prefix) and plugin_suffix_start in content:
             # Extraer el mensaje original entre las comillas
@@ -256,13 +274,17 @@ class SAILLM(CustomLLM):
 
         return False, content
 
-    def _process_plugin_messages(self, messages: list, request_id: str) -> tuple[bool, int]:
+    def _process_plugin_messages(
+        self, messages: list, request_id: str
+    ) -> tuple[bool, int]:
         plugin_detected = False
         plugin_count = 0
 
         for idx, msg in enumerate(messages):
             if isinstance(msg, dict) and "content" in msg:
-                is_plugin_msg, original_content = self._extract_plugin_wrapped_message(msg["content"])
+                is_plugin_msg, original_content = self._extract_plugin_wrapped_message(
+                    msg["content"]
+                )
                 if is_plugin_msg:
                     msg["content"] = original_content
                     plugin_detected = True
@@ -276,7 +298,9 @@ class SAILLM(CustomLLM):
 
         return plugin_detected, plugin_count
 
-    def _log_message_statistics(self, messages: list, request_id: str, plugin_detected: bool, plugin_count: int):
+    def _log_message_statistics(
+        self, messages: list, request_id: str, plugin_detected: bool, plugin_count: int
+    ):
         total_chars = sum(len(str(msg.get("content", ""))) for msg in messages)
         roles_count = {}
         for msg in messages:
@@ -311,11 +335,14 @@ class SAILLM(CustomLLM):
                 raise ValueError("Cada mensaje debe tener 'role' y 'content'")
 
     def _convert_to_sai_format(self, messages: list) -> list:
-        return [{
-            "content": msg.get("content", ""),
-            "role": msg.get("role"),
-            "id": int(time.time() * 1000) + idx
-        } for idx, msg in enumerate(messages)]
+        return [
+            {
+                "content": msg.get("content", ""),
+                "role": msg.get("role"),
+                "id": int(time.time() * 1000) + idx,
+            }
+            for idx, msg in enumerate(messages)
+        ]
 
     def _check_context_size(self, total_chars: int, request_id: str):
         estimated_tokens = total_chars // 4
@@ -334,10 +361,14 @@ class SAILLM(CustomLLM):
             raise ValueError("messages debe ser una lista no vacía")
 
         # Procesar mensajes envueltos por el plugin del IDE
-        plugin_detected, plugin_count = self._process_plugin_messages(messages, request_id)
+        plugin_detected, plugin_count = self._process_plugin_messages(
+            messages, request_id
+        )
 
         # Calcular estadísticas y registrar logs
-        total_chars = self._log_message_statistics(messages, request_id, plugin_detected, plugin_count)
+        total_chars = self._log_message_statistics(
+            messages, request_id, plugin_detected, plugin_count
+        )
 
         # Validar estructura de mensajes
         self._validate_message_structure(messages)
@@ -357,7 +388,7 @@ class SAILLM(CustomLLM):
 
         tool_call_id = None
         last_tool_idx = -1
-        
+
         # Extraer user prompt (último mensaje que NO sea tool)
         user_prompt = ""
         type_prompt = ""  # ← INICIALIZAR AQUÍ para evitar UnboundLocalError
@@ -374,7 +405,7 @@ class SAILLM(CustomLLM):
                     f"Longitud: {len(user_prompt)} chars"
                 )
                 break
-        
+
         # Determinar qué mensajes van al historial
         # Excluir tanto el último user como el último tool
         indices_to_exclude = set()
@@ -383,9 +414,10 @@ class SAILLM(CustomLLM):
         #    indices_to_exclude.add(last_user_idx)
         if last_tool_idx >= 0:
             indices_to_exclude.add(last_tool_idx)
-        
+
         chat_messages_raw = [
-            msg for idx, msg in enumerate(processed_messages)
+            msg
+            for idx, msg in enumerate(processed_messages)
             if idx not in indices_to_exclude
         ]
 
@@ -394,18 +426,20 @@ class SAILLM(CustomLLM):
         for idx, msg in enumerate(chat_messages_raw):
             role = msg.get("role")
             content = msg.get("content", "")
-            
+
             # Los mensajes tool que NO son el último se agregan al historial como tool
             if role == "tool":
                 tc_id = msg.get("tool_call_id")
                 tool_content = f"[Tool Response - ID: {tc_id}]\n{content}"
-                
-                chat_messages.append({
-                    "content": tool_content,
-                    "role": "tool",
-                    "id": int(time.time() * 1000) + idx
-                })
-                
+
+                chat_messages.append(
+                    {
+                        "content": tool_content,
+                        "role": "tool",
+                        "id": int(time.time() * 1000) + idx,
+                    }
+                )
+
                 logger.info(
                     f"🔧 [{request_id}] Mensaje tool histórico procesado | "
                     f"Tool call ID: {tc_id} | "
@@ -413,18 +447,30 @@ class SAILLM(CustomLLM):
                 )
             else:
                 # Mensaje normal (assistant, user, etc.)
-                chat_messages.append({
-                    "content": content,
-                    "role": role,
-                    "id": int(time.time() * 1000) + idx
-                })
+                chat_messages.append(
+                    {
+                        "content": content,
+                        "role": role,
+                        "id": int(time.time() * 1000) + idx,
+                    }
+                )
 
         # Validar tamaño del contexto
         self._check_context_size(total_chars, request_id)
 
         return system_prompt, user_prompt, tool_call_id, chat_messages, type_prompt
 
-    def _normalize_tool_calls(self, tool_calls, request_id: str) -> Optional[list]:
+    def _normalize_tool_calls(
+        self, tool_calls, request_id: str, api: str = "chat"
+    ) -> Optional[list]:
+        """
+        Normaliza tool_calls al formato esperado.
+
+        Args:
+            tool_calls: Los tool_calls a normalizar
+            request_id: ID de la request para logs
+            api: "chat" o "responses" - afecta cómo se procesa apply_patch
+        """
         if not tool_calls:
             return None
         if not isinstance(tool_calls, list):
@@ -443,13 +489,17 @@ class SAILLM(CustomLLM):
 
             # A2) Estilo "function_call": {"type":"function_call","function":{"name":...,"arguments":{...}}}
             # (ej.: {"cmd":"ls -la"} como dict)
-            elif tc.get("type") == "function_call" and isinstance(tc.get("function"), dict):
+            elif tc.get("type") == "function_call" and isinstance(
+                tc.get("function"), dict
+            ):
                 fn = tc.get("function") or {}
                 name = fn.get("name")
                 arguments = fn.get("arguments", "{}")
 
             # 🆕 A3) Estilo custom_tool_call con function wrapper: {"type":"custom_tool_call","function":{"name":...,"arguments":"..."}}
-            elif tc.get("type") == "custom_tool_call" and isinstance(tc.get("function"), dict):
+            elif tc.get("type") == "custom_tool_call" and isinstance(
+                tc.get("function"), dict
+            ):
                 fn = tc.get("function") or {}
                 name = fn.get("name")
                 arguments = fn.get("arguments", "")
@@ -483,7 +533,7 @@ class SAILLM(CustomLLM):
                     try:
                         json.loads(arguments)
                     except json.JSONDecodeError:
-                        repaired = arguments.replace('\\"', '"').replace('\\\\', '\\')
+                        repaired = arguments.replace('\\"', '"').replace("\\\\", "\\")
                         try:
                             json.loads(repaired)
                             logger.warning(
@@ -498,6 +548,84 @@ class SAILLM(CustomLLM):
                             )
                             arguments = "{}"
 
+            # ============================================================
+            # LÓGICA ESPECIAL PARA apply_patch SEGÚN TIPO DE API
+            # ============================================================
+            if name == "apply_patch":
+                if api == "responses":
+                    # Para /responses: el patch va directo, no envuelto
+                    logger.info(
+                        f"🔧 [{request_id}] [TOOLS] apply_patch: api=responses, pasando directo"
+                    )
+                elif api == "chat":
+                    # Para /chat/completions: necesita wrap en {"patchText": "..."}
+                    try:
+                        # Verificar si ya tiene patchText
+                        parsed = json.loads(arguments)
+                        if isinstance(parsed, dict) and "patchText" in parsed:
+                            arguments = arguments.strip()
+                            logger.info(
+                                f"🔧 [{request_id}] [TOOLS] apply_patch: api=chat, ya tiene patchText"
+                            )
+                        else:
+                            # Envolver en {"patchText": ...}
+                            unescaped = arguments.replace("\\n", "\n").replace(
+                                "\\t", "\t"
+                            )
+                            arguments = (
+                                '{"patchText": "'
+                                + unescaped.replace("\\", "\\\\")
+                                .replace('"', '\\"')
+                                .replace("\n", "\\n")
+                                .replace("\t", "\\t")
+                                + '"}'
+                            )
+                            logger.info(
+                                f"🔧 [{request_id}] [TOOLS] apply_patch: api=chat, envuelto en patchText"
+                            )
+                    except json.JSONDecodeError:
+                        # No es JSON, envolver directamente
+                        unescaped = arguments.replace("\\n", "\n").replace("\\t", "\t")
+                        arguments = (
+                            '{"patchText": "'
+                            + unescaped.replace("\\", "\\\\")
+                            .replace('"', '\\"')
+                            .replace("\n", "\\n")
+                            .replace("\t", "\\t")
+                            + '"}'
+                        )
+                        logger.info(
+                            f"🔧 [{request_id}] [TOOLS] apply_patch: api=chat, envuelto (no era JSON)"
+                        )
+                else:
+                    # Default: comportamiento de chat
+                    try:
+                        parsed = json.loads(arguments)
+                        if isinstance(parsed, dict) and "patchText" in parsed:
+                            arguments = arguments.strip()
+                        else:
+                            unescaped = arguments.replace("\\n", "\n").replace(
+                                "\\t", "\t"
+                            )
+                            arguments = (
+                                '{"patchText": "'
+                                + unescaped.replace("\\", "\\\\")
+                                .replace('"', '\\"')
+                                .replace("\n", "\\n")
+                                .replace("\t", "\\t")
+                                + '"}'
+                            )
+                    except json.JSONDecodeError:
+                        unescaped = arguments.replace("\\n", "\n").replace("\\t", "\t")
+                        arguments = (
+                            '{"patchText": "'
+                            + unescaped.replace("\\", "\\\\")
+                            .replace('"', '\\"')
+                            .replace("\n", "\\n")
+                            .replace("\t", "\\t")
+                            + '"}'
+                        )
+
             # Normalizar type: "function_call" -> "function" (formato esperado aguas abajo)
             tc_type = tc.get("type")
             if tc_type == "custom":
@@ -508,18 +636,18 @@ class SAILLM(CustomLLM):
             elif tc_type == "custom_tool_call":
                 tc_type = "custom_tool_call"
 
-            normalized.append({
-                "id": tc.get("id", f"call_{request_id}_{i}"),
-                "type": tc_type,
-                "function": {
-                    "name": name,
-                    "arguments": arguments
+            normalized.append(
+                {
+                    "id": tc.get("id", f"call_{request_id}_{i}"),
+                    "type": tc_type,
+                    "function": {"name": name, "arguments": arguments},
                 }
-            })
+            )
         return normalized or None
 
-    def _try_parse_from(self, start_idx: int, request_id: str, trimmed, decoder) -> tuple[
-        Optional[list], Optional[int], Optional[int], Optional[str]]:
+    def _try_parse_from(
+        self, start_idx: int, request_id: str, trimmed, decoder, api: str = "chat"
+    ) -> tuple[Optional[list], Optional[int], Optional[int], Optional[str]]:
         candidate = trimmed[start_idx:]
         try:
             obj, end = decoder.raw_decode(candidate)
@@ -564,7 +692,9 @@ class SAILLM(CustomLLM):
                     if isinstance(tc, dict) and "type" not in tc and "function" in tc:
                         tc["type"] = "function_call"
 
-            tool_calls = self._normalize_tool_calls(obj.get("tool_calls"), request_id)
+            tool_calls = self._normalize_tool_calls(
+                obj.get("tool_calls"), request_id, api
+            )
             if not tool_calls:
                 return None, None, None, None
 
@@ -574,7 +704,7 @@ class SAILLM(CustomLLM):
         # ✅ Caso 2 (nuevo): tool call "suelto" al final
         # Ej: {"type":"function_call","name":"exec_command","arguments":{...}}
         if isinstance(obj, dict) and (obj.get("name") or obj.get("function")):
-            tool_calls = self._normalize_tool_calls(obj, request_id)
+            tool_calls = self._normalize_tool_calls(obj, request_id, api)
             if not tool_calls:
                 return None, None, None, None
 
@@ -588,10 +718,16 @@ class SAILLM(CustomLLM):
         return None, None, None, None
 
     def _extract_tool_calls_from_plain_text_end(
-            self,
-            response_text: Optional[str],
-            request_id: str
+        self, response_text: Optional[str], request_id: str, api: str = "chat"
     ) -> tuple[Optional[list], str]:
+        """
+        Extrae tool_calls del texto de respuesta.
+
+        Args:
+            response_text: Texto de respuesta del modelo
+            request_id: ID para logs
+            api: "chat" o "responses" - afecta el procesamiento de apply_patch
+        """
         if response_text is None:
             logger.info(f"🧪 [{request_id}] [TOOLS] extractor: response_text=None")
             return None, ""
@@ -600,7 +736,9 @@ class SAILLM(CustomLLM):
 
         # Logs "antes"
         tail_preview = text[-500:] if len(text) > 500 else text
-        logger.info(f"🧪 [{request_id}] [TOOLS] BEFORE extracted | len={len(text)} | tail_preview={tail_preview!r}")
+        logger.info(
+            f"🧪 [{request_id}] [TOOLS] BEFORE extracted | len={len(text)} | tail_preview={tail_preview!r}"
+        )
 
         trimmed = text.rstrip()
         if not trimmed:
@@ -609,7 +747,8 @@ class SAILLM(CustomLLM):
 
         # NUEVO: Detectar y extraer JSON de bloques markdown ```json\n...\n```
         import re
-        markdown_json_pattern = r'```json\s*\n(.*?)\n```'
+
+        markdown_json_pattern = r"```json\s*\n(.*?)\n```"
         markdown_match = re.search(markdown_json_pattern, trimmed, re.DOTALL)
 
         if markdown_match:
@@ -629,7 +768,9 @@ class SAILLM(CustomLLM):
 
                 # ✅ Soportar wrapper {"tool_calls": ...}
                 if isinstance(obj, dict) and "tool_calls" in obj:
-                    tool_calls = self._normalize_tool_calls(obj.get("tool_calls"), request_id)
+                    tool_calls = self._normalize_tool_calls(
+                        obj.get("tool_calls"), request_id
+                    )
                     if tool_calls:
                         cleaned = trimmed[:markdown_start].rstrip()
                         after_tail = cleaned[-500:] if len(cleaned) > 500 else cleaned
@@ -644,7 +785,7 @@ class SAILLM(CustomLLM):
 
                 # ✅ Soportar tool_call suelto en markdown
                 if isinstance(obj, dict) and (obj.get("name") or obj.get("function")):
-                    tool_calls = self._normalize_tool_calls(obj, request_id)
+                    tool_calls = self._normalize_tool_calls(obj, request_id, api)
                     if tool_calls:
                         cleaned = trimmed[:markdown_start].rstrip()
                         after_tail = cleaned[-500:] if len(cleaned) > 500 else cleaned
@@ -669,7 +810,9 @@ class SAILLM(CustomLLM):
         # 1) Camino rápido: buscar el marcador {"tool_calls" desde el final
         marker_idx = trimmed.rfind('{"tool_calls"')
         if marker_idx != -1:
-            tool_calls, js, je, json_raw = self._try_parse_from(marker_idx, request_id, trimmed, decoder)
+            tool_calls, js, je, json_raw = self._try_parse_from(
+                marker_idx, request_id, trimmed, decoder, api
+            )
             if tool_calls:
                 cleaned = trimmed[:js].rstrip()
 
@@ -688,16 +831,20 @@ class SAILLM(CustomLLM):
                 # NUEVO: Log de diagnóstico cuando el marcador existe pero falla el parsing
                 logger.warning(
                     f"⚠️ [{request_id}] [TOOLS] Marcador '{{\"tool_calls\"' encontrado en pos {marker_idx} pero parsing falló | "
-                    f"Snippet: {trimmed[marker_idx:marker_idx+100]!r}"
+                    f"Snippet: {trimmed[marker_idx : marker_idx + 100]!r}"
                 )
 
         # 2) Fallback: escanear todos los '{' hacia atrás (evita caer en '{' dentro de strings)
         brace_positions = [i for i, ch in enumerate(trimmed) if ch == "{"]
 
-        logger.info(f"🧪 [{request_id}] [TOOLS] fallback scan: brace_positions={len(brace_positions)}")
+        logger.info(
+            f"🧪 [{request_id}] [TOOLS] fallback scan: brace_positions={len(brace_positions)}"
+        )
 
         for start_idx in reversed(brace_positions):
-            tool_calls, js, je, json_raw = self._try_parse_from(start_idx, request_id, trimmed, decoder)
+            tool_calls, js, je, json_raw = self._try_parse_from(
+                start_idx, request_id, trimmed, decoder, api
+            )
             if tool_calls:
                 cleaned = trimmed[:js].rstrip()
 
@@ -714,13 +861,37 @@ class SAILLM(CustomLLM):
 
         # 3) Multi-JSON: modelo emitió varios {"tool_calls"...} + texto inventado al final
         EXAMPLE_MARKERS = (
-            "se vería", "por ejemplo", "el formato", "como este", "así:", "ejemplo:",
-            "sería así", "quedaría así", "como sigue", "a continuación", "siguiente forma",
-            "de esta forma", "de este modo", "como muestra", "ilustración",
+            "se vería",
+            "por ejemplo",
+            "el formato",
+            "como este",
+            "así:",
+            "ejemplo:",
+            "sería así",
+            "quedaría así",
+            "como sigue",
+            "a continuación",
+            "siguiente forma",
+            "de esta forma",
+            "de este modo",
+            "como muestra",
+            "ilustración",
         )
         INVENTED_RESULT_MARKERS = (
-            "- `", "**", "├", "└", "│", ".py`", ".java`", ".ts`", ".js`",
-            ".json`", ".yaml`", ".yml`", ".md`", ".txt`",
+            "- `",
+            "**",
+            "├",
+            "└",
+            "│",
+            ".py`",
+            ".java`",
+            ".ts`",
+            ".js`",
+            ".json`",
+            ".yaml`",
+            ".yml`",
+            ".md`",
+            ".txt`",
         )
         all_tool_calls = []
         search_start = 0
@@ -739,7 +910,7 @@ class SAILLM(CustomLLM):
                 continue
 
             if isinstance(obj, dict) and "tool_calls" in obj:
-                tcs = self._normalize_tool_calls(obj.get("tool_calls"), request_id)
+                tcs = self._normalize_tool_calls(obj.get("tool_calls"), request_id, api)
                 if tcs:
                     if first_json_pos is None:
                         first_json_pos = marker_pos
@@ -753,7 +924,9 @@ class SAILLM(CustomLLM):
 
             if text_before:
                 text_before_lower = text_before.lower()
-                is_example_intro = any(marker in text_before_lower for marker in EXAMPLE_MARKERS)
+                is_example_intro = any(
+                    marker in text_before_lower for marker in EXAMPLE_MARKERS
+                )
                 if is_example_intro:
                     logger.info(
                         f"🧪 [{request_id}] [TOOLS] multi-JSON descartado: texto antes contiene marcador de ejemplo | "
@@ -761,7 +934,9 @@ class SAILLM(CustomLLM):
                     )
                     return None, text
 
-            text_after_looks_invented = any(m in text_after for m in INVENTED_RESULT_MARKERS)
+            text_after_looks_invented = any(
+                m in text_after for m in INVENTED_RESULT_MARKERS
+            )
             no_text_before = not text_before
 
             if no_text_before or text_after_looks_invented:
@@ -779,7 +954,9 @@ class SAILLM(CustomLLM):
             )
 
         # No se encontró JSON tool_calls al final
-        logger.info(f"🧪 [{request_id}] [TOOLS] extractor: NO tool_calls JSON encontrado al final")
+        logger.info(
+            f"🧪 [{request_id}] [TOOLS] extractor: NO tool_calls JSON encontrado al final"
+        )
         return None, text
 
     # ---------------- Síncrono ----------------
@@ -801,22 +978,28 @@ class SAILLM(CustomLLM):
         # Omitir si es lista vacía
         if tools is not None and isinstance(tools, list) and len(tools) == 0:
             tools = None
-            logger.info(f"🔧 [{request_id}] [TOOLS] tools es lista vacía [] - omitiendo para evitar falsos positivos")
-        
+            logger.info(
+                f"🔧 [{request_id}] [TOOLS] tools es lista vacía [] - omitiendo para evitar falsos positivos"
+            )
+
         # NUEVA LÓGICA: Detectar si hay mensajes con role="tool"
-        #has_tool_messages = any(msg.get("role") == "tool" for msg in messages if isinstance(msg, dict))
-        #if has_tool_messages and tools is not None:
+        # has_tool_messages = any(msg.get("role") == "tool" for msg in messages if isinstance(msg, dict))
+        # if has_tool_messages and tools is not None:
         #    logger.info(
         #        f"🔧 [{request_id}] [TOOLS] Mensajes con role='tool' detectados | "
         #        f"Acción: Eliminando tools de la entrada (se espera respuesta, no tool_calls)"
         #    )
         #    tools = None
-        
+
         has_tools = bool(tools)  # Guardar si hay tools en la entrada
         if has_tools:
-            print(f"[{request_id}] [TOOLS] completion(): tools recibidas count={len(tools)}")
+            print(
+                f"[{request_id}] [TOOLS] completion(): tools recibidas count={len(tools)}"
+            )
 
-        system, user_prompt, tool_call_id, chat_messages, type_prompt = self._prepare_messages(messages, request_id)
+        system, user_prompt, tool_call_id, chat_messages, type_prompt = (
+            self._prepare_messages(messages, request_id)
+        )
 
         response_text, finish_reason, usage_data = self._call_sai(
             system,
@@ -827,18 +1010,22 @@ class SAILLM(CustomLLM):
             type_prompt,
             api,
             user_api_key=user_api_key,
-            model=kwargs.get('model'),
-            tools=tools
+            model=kwargs.get("model"),
+            tools=tools,
         )
 
         # SOLO extraer tool_calls si se enviaron tools en la entrada
         tool_calls = None
         cleaned_text = response_text
-        
+
         if has_tools:
-            tool_calls, cleaned_text = self._extract_tool_calls_from_plain_text_end(response_text, request_id)
+            tool_calls, cleaned_text = self._extract_tool_calls_from_plain_text_end(
+                response_text, request_id, api
+            )
         else:
-            logger.info(f"🧪 [{request_id}] [TOOLS] completion(): NO tools en entrada -> extractor OMITIDO")
+            logger.info(
+                f"🧪 [{request_id}] [TOOLS] completion(): NO tools en entrada -> extractor OMITIDO"
+            )
 
         if tool_calls:
             # Log para debug: imprimir tool_calls antes de retornar
@@ -852,7 +1039,7 @@ class SAILLM(CustomLLM):
                 usage={
                     "prompt_tokens": usage_data["prompt_tokens"],
                     "completion_tokens": usage_data["completion_tokens"],
-                    "total_tokens": usage_data["total_tokens"]
+                    "total_tokens": usage_data["total_tokens"],
                 }
             )
             # CORRECCIÓN: content debe ser None (null en JSON), no string vacío
@@ -868,13 +1055,15 @@ class SAILLM(CustomLLM):
             usage={
                 "prompt_tokens": usage_data["prompt_tokens"],
                 "completion_tokens": usage_data["completion_tokens"],
-                "total_tokens": usage_data["total_tokens"]
+                "total_tokens": usage_data["total_tokens"],
             }
         )
         response.choices[0].message.content = cleaned_text
-        
+
         # Para compatibilidad con clientes legacy que esperan .text
-        if not (user_agent and ('GitKraken' in user_agent or 'Go-http-client' in user_agent)):
+        if not (
+            user_agent and ("GitKraken" in user_agent or "Go-http-client" in user_agent)
+        ):
             response.text = cleaned_text
             logger.info(
                 f"✅ [{request_id}] [RESPONSE] Asignado a message.content Y text | "
@@ -902,38 +1091,46 @@ class SAILLM(CustomLLM):
 
         user_api_key = self._extract_user_api_key(kwargs, request_id)
         user_agent = self._extract_user_agent(kwargs, request_id)
-        model = kwargs.get('model')
+        model = kwargs.get("model")
+        api = kwargs.get("api", "chat")
 
         tools = kwargs.get("tools")
         # Omitir si es lista vacía
         if tools is not None and isinstance(tools, list) and len(tools) == 0:
             tools = None
-            logger.info(f"🔧 [{request_id}] [TOOLS] tools es lista vacía [] - omitiendo para evitar falsos positivos")
-        
+            logger.info(
+                f"🔧 [{request_id}] [TOOLS] tools es lista vacía [] - omitiendo para evitar falsos positivos"
+            )
+
         # NUEVA LÓGICA: Detectar si hay mensajes con role="tool"
-        #has_tool_messages = any(msg.get("role") == "tool" for msg in messages if isinstance(msg, dict))
-        #if has_tool_messages and tools is not None:
+        # has_tool_messages = any(msg.get("role") == "tool" for msg in messages if isinstance(msg, dict))
+        # if has_tool_messages and tools is not None:
         #    logger.info(
         #        f"🔧 [{request_id}] [TOOLS] Mensajes con role='tool' detectados | "
         #        f"Acción: Eliminando tools de la entrada (se espera respuesta, no tool_calls)"
         #    )
         #    tools = None
-        
-        has_tools = bool(tools)  # Guardar si hay tools en la entrada
-        logger.info(f"🧪 [{request_id}] [TOOLS] acompletion(): tools_present={has_tools} tools_type={type(tools).__name__ if tools else 'None'}")
 
-        system, user_prompt, tool_call_id, chat_messages, type_prompt = self._prepare_messages(messages, request_id)
+        has_tools = bool(tools)  # Guardar si hay tools en la entrada
+        logger.info(
+            f"🧪 [{request_id}] [TOOLS] acompletion(): tools_present={has_tools} tools_type={type(tools).__name__ if tools else 'None'}"
+        )
+
+        system, user_prompt, tool_call_id, chat_messages, type_prompt = (
+            self._prepare_messages(messages, request_id)
+        )
 
         loop = asyncio.get_running_loop()
 
         from functools import partial
+
         call_sai_with_params = partial(
-            self._call_sai, 
-            user_api_key=user_api_key, 
-            model=model, 
+            self._call_sai,
+            user_api_key=user_api_key,
+            model=model,
             tools=tools,
             type=type_prompt,
-            api=kwargs["api"]
+            api=kwargs["api"],
         )
 
         response_text, finish_reason, usage_data = await loop.run_in_executor(
@@ -943,7 +1140,7 @@ class SAILLM(CustomLLM):
             user_prompt,
             tool_call_id,
             chat_messages,
-            request_id
+            request_id,
         )
 
         # Log explícito de llegada de respuesta
@@ -956,13 +1153,19 @@ class SAILLM(CustomLLM):
         # SOLO extraer tool_calls si se enviaron tools en la entrada
         tool_calls = None
         cleaned_text = response_text
-        
-        if has_tools:
-            tool_calls, cleaned_text = self._extract_tool_calls_from_plain_text_end(response_text, request_id)
-        else:
-            logger.info(f"🧪 [{request_id}] [TOOLS] acompletion(): NO tools en entrada -> extractor OMITIDO")
 
-        logger.info(f"🧪 [{request_id}] [TOOLS] acompletion(): extracted_tool_calls={bool(tool_calls)} cleaned_len={len(cleaned_text)}")
+        if has_tools:
+            tool_calls, cleaned_text = self._extract_tool_calls_from_plain_text_end(
+                response_text, request_id, api
+            )
+        else:
+            logger.info(
+                f"🧪 [{request_id}] [TOOLS] acompletion(): NO tools en entrada -> extractor OMITIDO"
+            )
+
+        logger.info(
+            f"🧪 [{request_id}] [TOOLS] acompletion(): extracted_tool_calls={bool(tool_calls)} cleaned_len={len(cleaned_text)}"
+        )
 
         if tool_calls:
             # Log para debug: imprimir tool_calls antes de retornar
@@ -976,7 +1179,7 @@ class SAILLM(CustomLLM):
                 usage={
                     "prompt_tokens": usage_data["prompt_tokens"],
                     "completion_tokens": usage_data["completion_tokens"],
-                    "total_tokens": usage_data["total_tokens"]
+                    "total_tokens": usage_data["total_tokens"],
                 }
             )
             response.choices[0].message.content = cleaned_text  # ← Cambio aquí
@@ -992,13 +1195,15 @@ class SAILLM(CustomLLM):
             usage={
                 "prompt_tokens": usage_data["prompt_tokens"],
                 "completion_tokens": usage_data["completion_tokens"],
-                "total_tokens": usage_data["total_tokens"]
+                "total_tokens": usage_data["total_tokens"],
             }
         )
         response.choices[0].message.content = cleaned_text
-        
+
         # Para compatibilidad con clientes legacy que esperan .text
-        if not (user_agent and ('GitKraken' in user_agent or 'Go-http-client' in user_agent)):
+        if not (
+            user_agent and ("GitKraken" in user_agent or "Go-http-client" in user_agent)
+        ):
             response.text = cleaned_text
             logger.info(
                 f"✅ [{request_id}] [RESPONSE] Asignado a message.content Y text | "
@@ -1016,13 +1221,15 @@ class SAILLM(CustomLLM):
         return response
 
     # ---------------- Streaming ----------------
-    async def astreaming(self, request_id, messages=None, **kwargs) -> AsyncIterator[GenericStreamingChunk]:
+    async def astreaming(
+        self, request_id, messages=None, **kwargs
+    ) -> AsyncIterator[GenericStreamingChunk]:
         # Log detallado de kwargs solo si VERBOSE_LOGGING está activado
         if VERBOSE_LOGGING:
             logger.debug(f"⚙️ [{request_id}] kwargs recibidos en astreaming: {kwargs}")
 
         # Pasar el request_id y todos los kwargs a acompletion
-        kwargs['_request_id'] = request_id
+        kwargs["_request_id"] = request_id
 
         response = await self.acompletion(request_id, messages, **kwargs)
 
@@ -1030,21 +1237,21 @@ class SAILLM(CustomLLM):
         text = None
         tool_calls = None
 
-        if hasattr(response, 'choices') and response.choices:
+        if hasattr(response, "choices") and response.choices:
             choice = response.choices[0]
 
-            if hasattr(choice, 'message'):
-                if hasattr(choice.message, 'tool_calls') and choice.message.tool_calls:
+            if hasattr(choice, "message"):
+                if hasattr(choice.message, "tool_calls") and choice.message.tool_calls:
                     tool_calls = choice.message.tool_calls
                     logger.info(
                         f"🔧 [{request_id}] [STREAMING] Response contiene tool_calls | "
                         f"Count: {len(tool_calls)}"
                     )
 
-                if hasattr(choice.message, 'content') and choice.message.content:
+                if hasattr(choice.message, "content") and choice.message.content:
                     text = choice.message.content
                     logger.info(f"choice.message.content: {bool(text)}")
-        elif hasattr(response, 'text') and response.text:
+        elif hasattr(response, "text") and response.text:
             text = response.text
             logger.info(f"response.text: {bool(text)}")
 
@@ -1058,7 +1265,11 @@ class SAILLM(CustomLLM):
             )
             return
 
-        usage_dict = response.usage.__dict__ if not isinstance(response.usage, dict) else response.usage
+        usage_dict = (
+            response.usage.__dict__
+            if not isinstance(response.usage, dict)
+            else response.usage
+        )
         finish_reason = response.choices[0].finish_reason
 
         # Convertir tool_calls a formato serializable (si aplica)
@@ -1066,14 +1277,18 @@ class SAILLM(CustomLLM):
         if tool_calls:
             tool_calls_list = []
             for tc in tool_calls:
-                if hasattr(tc, '__dict__'):
+                if hasattr(tc, "__dict__"):
                     tc_dict = {
-                        "id": getattr(tc, 'id', f"call_{request_id}"),
-                        "type": getattr(tc, 'type', 'function'),
+                        "id": getattr(tc, "id", f"call_{request_id}"),
+                        "type": getattr(tc, "type", "function"),
                         "function": {
-                            "name": getattr(tc.function, 'name', '') if hasattr(tc, 'function') else '',
-                            "arguments": getattr(tc.function, 'arguments', '{}') if hasattr(tc, 'function') else '{}'
-                        }
+                            "name": getattr(tc.function, "name", "")
+                            if hasattr(tc, "function")
+                            else "",
+                            "arguments": getattr(tc.function, "arguments", "{}")
+                            if hasattr(tc, "function")
+                            else "{}",
+                        },
                     }
                 else:
                     tc_dict = tc
@@ -1092,11 +1307,13 @@ class SAILLM(CustomLLM):
             is_finished=True,
             finish_reason=finish_reason,
             tool_use=tool_calls_list,
-            usage=usage_dict
+            usage=usage_dict,
         )
 
     # ---------------- Métodos auxiliares para reducir complejidad ----------------
-    def _determine_auth_method(self, user_api_key: Optional[str], request_id: str) -> tuple[Optional[str], Optional[str], str]:
+    def _determine_auth_method(
+        self, user_api_key: Optional[str], request_id: str
+    ) -> tuple[Optional[str], Optional[str], str]:
         custom_cookie = None
         api_key_to_use = None
 
@@ -1110,13 +1327,21 @@ class SAILLM(CustomLLM):
             auth_type = "Cookie personalizada"
         else:
             api_key_to_use = user_api_key if user_api_key else SAI_KEY
-            auth_type = "API Key personalizada" if user_api_key else "API Key por defecto"
+            auth_type = (
+                "API Key personalizada" if user_api_key else "API Key por defecto"
+            )
 
         return custom_cookie, api_key_to_use, auth_type
 
-    def _execute_request_with_retry(self, url: str, data: dict, custom_cookie: Optional[str], 
-                                   api_key_to_use: Optional[str], user_api_key: Optional[str], 
-                                   request_id: str) -> tuple[Optional[str], Optional[dict], str]:
+    def _execute_request_with_retry(
+        self,
+        url: str,
+        data: dict,
+        custom_cookie: Optional[str],
+        api_key_to_use: Optional[str],
+        user_api_key: Optional[str],
+        request_id: str,
+    ) -> tuple[Optional[str], Optional[dict], str]:
         response = None
         response_headers = None
         auth_method_used = None
@@ -1127,17 +1352,27 @@ class SAILLM(CustomLLM):
                 f"Longitud: {len(custom_cookie)} caracteres"
             )
             response, response_headers = self._make_request(
-                url, data, use_api_key=False, request_id=request_id, custom_cookie=custom_cookie
+                url,
+                data,
+                use_api_key=False,
+                request_id=request_id,
+                custom_cookie=custom_cookie,
             )
             auth_method_used = "Cookie personalizada del usuario"
         elif api_key_to_use:
-            api_key_type = "personalizada del usuario" if user_api_key else "del sistema (SAI_KEY)"
+            api_key_type = (
+                "personalizada del usuario" if user_api_key else "del sistema (SAI_KEY)"
+            )
             logger.info(
                 f"🔑 [{request_id}] [AUTH] Intento #1 con API Key {api_key_type} | "
                 f"Longitud: {len(api_key_to_use)} caracteres"
             )
             response, response_headers = self._make_request(
-                url, data, use_api_key=True, request_id=request_id, custom_api_key=api_key_to_use
+                url,
+                data,
+                use_api_key=True,
+                request_id=request_id,
+                custom_api_key=api_key_to_use,
             )
             auth_method_used = f"API Key ({api_key_type})"
 
@@ -1153,10 +1388,14 @@ class SAILLM(CustomLLM):
                     f"Razón probable: 'Test template usage limit exceeded' | "
                     f"Decisión: Reintentando con Cookie (Intento #2)"
                 )
-                response, response_headers = self._make_request(url, data, use_api_key=False, request_id=request_id)
+                response, response_headers = self._make_request(
+                    url, data, use_api_key=False, request_id=request_id
+                )
                 auth_method_used = "Cookie (fallback desde API Key)"
                 if response:
-                    logger.info(f"✅ [{request_id}] [AUTH] Intento #2 EXITOSO con Cookie")
+                    logger.info(
+                        f"✅ [{request_id}] [AUTH] Intento #2 EXITOSO con Cookie"
+                    )
             elif response is None and not SAI_COOKIE:
                 logger.error(
                     f"❌ [{request_id}] [AUTH] Intento #1 FALLIDO: Rate limit (429) con API Key | "
@@ -1168,7 +1407,9 @@ class SAILLM(CustomLLM):
                 f"🍪 [{request_id}] [AUTH] Usando Cookie del sistema | "
                 f"Razón: No hay API Key configurada (ni personalizada ni SAI_KEY)"
             )
-            response, response_headers = self._make_request(url, data, use_api_key=False, request_id=request_id)
+            response, response_headers = self._make_request(
+                url, data, use_api_key=False, request_id=request_id
+            )
             auth_method_used = "Cookie (única opción disponible)"
 
         return response, response_headers, auth_method_used
@@ -1209,14 +1450,20 @@ class SAILLM(CustomLLM):
                 "Si el problema persiste, contacte al administrador del sistema."
             )
 
-    def _handle_error_response(self, response: Optional[str], auth_method_used: str,
-                               request_id: str, chat_messages: list, url: str) -> Optional[tuple[str, str, dict]]:
+    def _handle_error_response(
+        self,
+        response: Optional[str],
+        auth_method_used: str,
+        request_id: str,
+        chat_messages: list,
+        url: str,
+    ) -> Optional[tuple[str, str, dict]]:
         usage_data = {
             "prompt_tokens": 0,
             "completion_tokens": 0,
             "total_tokens": 0,
             "model": "unknown",
-            "response_time": 0.0
+            "response_time": 0.0,
         }
 
         if response == "UNAUTHORIZED_ERROR":
@@ -1236,13 +1483,17 @@ class SAILLM(CustomLLM):
                 f"Acción requerida: El cliente debe reducir el historial"
             )
             return (
-                "⚠️ **Contexto demasiado largo**\n\n"
-                f"El historial de conversación excede el límite del modelo ({len(chat_messages)} mensajes).\n"
-                "**Acciones sugeridas:**\n"
-                "1. Reduzca el número de mensajes en el historial\n"
-                "2. Inicie una nueva conversación\n"
-                "3. Resuma el contexto anterior en un mensaje más corto"
-            ), "length", usage_data
+                (
+                    "⚠️ **Contexto demasiado largo**\n\n"
+                    f"El historial de conversación excede el límite del modelo ({len(chat_messages)} mensajes).\n"
+                    "**Acciones sugeridas:**\n"
+                    "1. Reduzca el número de mensajes en el historial\n"
+                    "2. Inicie una nueva conversación\n"
+                    "3. Resuma el contexto anterior en un mensaje más corto"
+                ),
+                "length",
+                usage_data,
+            )
 
         if response == "HTTP_500_ERROR":
             logger.error(
@@ -1250,14 +1501,18 @@ class SAILLM(CustomLLM):
                 f"Template: {SAI_TEMPLATE_ID}"
             )
             return (
-                "❌ **Error interno del servidor SAI (HTTP 500)**\n\n"
-                "El servidor SAI encontró un error inesperado al procesar la solicitud.\n"
-                "**Posibles causas:**\n"
-                "1. Error interno del modelo o servicio\n"
-                "2. Configuración incorrecta del template\n"
-                "3. Problema temporal del servidor\n\n"
-                "Por favor, intente nuevamente. Si el problema persiste, contacte al administrador."
-            ), "error", usage_data
+                (
+                    "❌ **Error interno del servidor SAI (HTTP 500)**\n\n"
+                    "El servidor SAI encontró un error inesperado al procesar la solicitud.\n"
+                    "**Posibles causas:**\n"
+                    "1. Error interno del modelo o servicio\n"
+                    "2. Configuración incorrecta del template\n"
+                    "3. Problema temporal del servidor\n\n"
+                    "Por favor, intente nuevamente. Si el problema persiste, contacte al administrador."
+                ),
+                "error",
+                usage_data,
+            )
 
         if response is None:
             logger.error(
@@ -1267,14 +1522,18 @@ class SAILLM(CustomLLM):
                 f"Auth disponible: API Key={bool(SAI_KEY)}, Cookie={bool(SAI_COOKIE)}"
             )
             return (
-                "❌ **Error de conexión con SAI**\n\n"
-                "No se pudo obtener respuesta del servidor SAI.\n"
-                "**Posibles causas:**\n"
-                "1. Problemas de red o conectividad\n"
-                "2. Credenciales de autenticación inválidas\n"
-                "3. Servicio SAI temporalmente no disponible\n\n"
-                "Por favor, intente nuevamente en unos momentos."
-            ), "error", usage_data
+                (
+                    "❌ **Error de conexión con SAI**\n\n"
+                    "No se pudo obtener respuesta del servidor SAI.\n"
+                    "**Posibles causas:**\n"
+                    "1. Problemas de red o conectividad\n"
+                    "2. Credenciales de autenticación inválidas\n"
+                    "3. Servicio SAI temporalmente no disponible\n\n"
+                    "Por favor, intente nuevamente en unos momentos."
+                ),
+                "error",
+                usage_data,
+            )
 
         return None
 
@@ -1285,23 +1544,37 @@ class SAILLM(CustomLLM):
             "completion_tokens": 0,
             "total_tokens": 0,
             "model": "unknown",
-            "response_time": 0.0
+            "response_time": 0.0,
         }
 
         if response_headers:
             usage_data["prompt_tokens"] = response_headers.get("prompt_tokens", 0)
-            usage_data["completion_tokens"] = response_headers.get("completion_tokens", 0)
-            usage_data["total_tokens"] = usage_data["prompt_tokens"] + usage_data["completion_tokens"]
+            usage_data["completion_tokens"] = response_headers.get(
+                "completion_tokens", 0
+            )
+            usage_data["total_tokens"] = (
+                usage_data["prompt_tokens"] + usage_data["completion_tokens"]
+            )
             usage_data["model"] = response_headers.get("model", "unknown")
             usage_data["response_time"] = response_headers.get("response_time", 0.0)
 
         return usage_data
 
-    def _log_successful_response(self, request_id: str, response: str, response_headers: Optional[dict], usage_data: dict):
+    def _log_successful_response(
+        self,
+        request_id: str,
+        response: str,
+        response_headers: Optional[dict],
+        usage_data: dict,
+    ):
         """Registra información de una respuesta exitosa."""
-        status_code = response_headers.get("status_code", "N/A") if response_headers else "N/A"
-        response_time = usage_data['response_time']
-        tokens_per_second = response_headers.get("tokens_per_second", 0.0) if response_headers else 0.0
+        status_code = (
+            response_headers.get("status_code", "N/A") if response_headers else "N/A"
+        )
+        response_time = usage_data["response_time"]
+        tokens_per_second = (
+            response_headers.get("tokens_per_second", 0.0) if response_headers else 0.0
+        )
 
         logger.info(
             f"✅ [SERVER → CLIENT] [{request_id}] Respuesta lista para enviar | "
@@ -1315,8 +1588,13 @@ class SAILLM(CustomLLM):
         )
 
     # ---------------- Métodos auxiliares para _make_request ----------------
-    def _setup_request_headers(self, use_api_key: bool, custom_api_key: Optional[str],
-                               custom_cookie: Optional[str], request_id: str) -> tuple[dict, str]:
+    def _setup_request_headers(
+        self,
+        use_api_key: bool,
+        custom_api_key: Optional[str],
+        custom_cookie: Optional[str],
+        request_id: str,
+    ) -> tuple[dict, str]:
         """
         Configura los headers de autenticación para la petición.
 
@@ -1326,7 +1604,7 @@ class SAILLM(CustomLLM):
         headers = {
             "Content-Type": "application/json",
             "Accept": "application/json, text/plain, */*",
-            "Accept-Encoding": "gzip, deflate"
+            "Accept-Encoding": "gzip, deflate",
         }
 
         auth_method = "API Key" if use_api_key else "Cookie"
@@ -1339,12 +1617,16 @@ class SAILLM(CustomLLM):
         elif SAI_COOKIE:
             headers["Cookie"] = SAI_COOKIE
         else:
-            logger.error(f"❌ [{request_id}] No hay método de autenticación disponible (ni API Key ni Cookie)")
+            logger.error(
+                f"❌ [{request_id}] No hay método de autenticación disponible (ni API Key ni Cookie)"
+            )
             return None, None
 
         return headers, auth_method
 
-    def _log_request_payload(self, data: dict, auth_method: str, request_timeout: int, request_id: str):
+    def _log_request_payload(
+        self, data: dict, auth_method: str, request_timeout: int, request_id: str
+    ):
         """Registra información del payload de la petición."""
         chat_msg_count = len(data.get("chatMessages", []))
         system_length = len(data.get("inputs", {}).get("system", ""))
@@ -1370,16 +1652,21 @@ class SAILLM(CustomLLM):
                 f"{data.get('chatMessages', [])}"
             )
 
-    def _execute_http_request(self, url: str, data: dict, headers: dict,
-                             request_timeout: int, request_id: str):
+    def _execute_http_request(
+        self, url: str, data: dict, headers: dict, request_timeout: int, request_id: str
+    ):
         start_time = time.time()
         logger.debug(f"[{request_id}] [HTTP] Iniciando petición POST a SAI...")
 
-        resp = http_session.post(url, json=data, headers=headers, timeout=request_timeout, verify=False)
+        resp = http_session.post(
+            url, json=data, headers=headers, timeout=request_timeout, verify=False
+        )
         resp.raise_for_status()
 
         response_time = time.time() - start_time
-        logger.debug(f"[{request_id}] [HTTP] Respuesta recibida en {response_time:.2f}s | Status: {resp.status_code}")
+        logger.debug(
+            f"[{request_id}] [HTTP] Respuesta recibida en {response_time:.2f}s | Status: {resp.status_code}"
+        )
 
         return resp
 
@@ -1399,17 +1686,23 @@ class SAILLM(CustomLLM):
             "prompt_tokens": prompt_tokens,
             "completion_tokens": completion_tokens,
             "model": resp.headers.get("model", "unknown"),
-            "response_time": response_time
+            "response_time": response_time,
         }
 
-        tokens_per_second = response_headers['completion_tokens'] / response_time if response_time > 0 else 0
-        response_headers['status_code'] = resp.status_code
-        response_headers['tokens_per_second'] = tokens_per_second
-        response_headers['response_length'] = len(resp.text)
+        tokens_per_second = (
+            response_headers["completion_tokens"] / response_time
+            if response_time > 0
+            else 0
+        )
+        response_headers["status_code"] = resp.status_code
+        response_headers["tokens_per_second"] = tokens_per_second
+        response_headers["response_length"] = len(resp.text)
 
         return response_headers
 
-    def _handle_http_401_error(self, resp, auth_method: str, url: str, request_id: str) -> None:
+    def _handle_http_401_error(
+        self, resp, auth_method: str, url: str, request_id: str
+    ) -> None:
         """Maneja errores HTTP 401 Unauthorized lanzando SAIAuthenticationError."""
         logger.error(
             f"🔐 [{request_id}] [HTTP 401] Unauthorized | "
@@ -1461,11 +1754,11 @@ class SAILLM(CustomLLM):
             f"Diagnóstico: Error interno del servidor SAI (no relacionado con tamaño de prompt) | "
             f"Respuesta SAI (preview): {response_text[:200]}"
         )
-        raise SAIServerError(
-            "Error interno del servidor SAI al procesar la solicitud."
-        )
+        raise SAIServerError("Error interno del servidor SAI al procesar la solicitud.")
 
-    def _handle_other_http_errors(self, resp, auth_method: str, url: str, e: Exception, request_id: str) -> None:
+    def _handle_other_http_errors(
+        self, resp, auth_method: str, url: str, e: Exception, request_id: str
+    ) -> None:
         """Maneja otros errores HTTP no específicos lanzando SAIAPIError."""
         status_code = resp.status_code if resp else "N/A"
         response_text = resp.text[:200] if resp else ""
@@ -1477,9 +1770,7 @@ class SAILLM(CustomLLM):
             f"Exception: {type(e).__name__}: {str(e)} | "
             f"Respuesta del servidor: {response_text}"
         )
-        raise SAIAPIError(
-            f"Error HTTP {status_code} al llamar a SAI: {response_text}"
-        )
+        raise SAIAPIError(f"Error HTTP {status_code} al llamar a SAI: {response_text}")
 
     def _handle_request_exceptions(
         self,
@@ -1535,10 +1826,19 @@ class SAILLM(CustomLLM):
             raise SAIAPIError(str(e))
 
     # ---------------- Llamada privada a SAI (refactorizada) ----------------
-    def _call_sai(self, system: str, user: str, tool_call_id: Optional[str],
-                  chat_messages: list, request_id: str, type: str, api: str,
-                  user_api_key: Optional[str] = None, model: Optional[str] = None, 
-                  tools: Optional = None) -> tuple[str, str, dict]:
+    def _call_sai(
+        self,
+        system: str,
+        user: str,
+        tool_call_id: Optional[str],
+        chat_messages: list,
+        request_id: str,
+        type: str,
+        api: str,
+        user_api_key: Optional[str] = None,
+        model: Optional[str] = None,
+        tools: Optional = None,
+    ) -> tuple[str, str, dict]:
         # Construir URL base
         url = f"{SAI_URL}/api/templates/{SAI_TEMPLATE_ID}/execute"
 
@@ -1558,10 +1858,10 @@ class SAILLM(CustomLLM):
                 "user": user,
                 "tools": None,  # tools definitions (se llenará después)
                 "type": type,
-                "api": api
+                "api": api,
             }
         }
-        
+
         if chat_messages:
             data["chatMessages"] = chat_messages
 
@@ -1569,28 +1869,42 @@ class SAILLM(CustomLLM):
         tools_json_str = None
         if tools is None:
             tools_json_str = None
-            logger.debug(f"[{request_id}] [TOOLS] _call_sai(): tools=None -> inputs.tools=None")
+            logger.debug(
+                f"[{request_id}] [TOOLS] _call_sai(): tools=None -> inputs.tools=None"
+            )
         elif isinstance(tools, list) and len(tools) == 0:
             tools_json_str = None
-            logger.info(f"🔧 [{request_id}] [TOOLS] _call_sai(): tools=[] (lista vacía) -> inputs.tools=None (omitido)")
+            logger.info(
+                f"🔧 [{request_id}] [TOOLS] _call_sai(): tools=[] (lista vacía) -> inputs.tools=None (omitido)"
+            )
         elif isinstance(tools, str):
             tools_json_str = tools
             try:
                 json.loads(tools_json_str)
-                logger.debug(f"[{request_id}] [TOOLS] _call_sai(): tools ya es JSON string válido (len={len(tools_json_str)})")
+                logger.debug(
+                    f"[{request_id}] [TOOLS] _call_sai(): tools ya es JSON string válido (len={len(tools_json_str)})"
+                )
             except Exception as e:
-                logger.warning(f"⚠️ [{request_id}] [TOOLS] _call_sai(): WARNING tools es string pero NO es JSON válido: {type(e).__name__}: {str(e)}")
+                logger.warning(
+                    f"⚠️ [{request_id}] [TOOLS] _call_sai(): WARNING tools es string pero NO es JSON válido: {type(e).__name__}: {str(e)}"
+                )
         else:
             tools_json_str = json.dumps(tools, ensure_ascii=False)
-            logger.debug(f"[{request_id}] [TOOLS] _call_sai(): tools serializadas a JSON string (len={len(tools_json_str)})")
+            logger.debug(
+                f"[{request_id}] [TOOLS] _call_sai(): tools serializadas a JSON string (len={len(tools_json_str)})"
+            )
 
         data["inputs"]["tools"] = tools_json_str
 
         if tools_json_str and VERBOSE_LOGGING:
-            logger.debug(f"[{request_id}] [TOOLS] inputs.tools preview={tools_json_str[:180]!r}")
+            logger.debug(
+                f"[{request_id}] [TOOLS] inputs.tools preview={tools_json_str[:180]!r}"
+            )
 
         # Determinar método de autenticación
-        custom_cookie, api_key_to_use, auth_type = self._determine_auth_method(user_api_key, request_id)
+        custom_cookie, api_key_to_use, auth_type = self._determine_auth_method(
+            user_api_key, request_id
+        )
 
         # Logging del request
         if not custom_cookie:
@@ -1604,7 +1918,9 @@ class SAILLM(CustomLLM):
             )
 
         if VERBOSE_LOGGING:
-            logger.debug(f"[{request_id}] Payload completo:\n{json.dumps(data, indent=2, ensure_ascii=False)}")
+            logger.debug(
+                f"[{request_id}] Payload completo:\n{json.dumps(data, indent=2, ensure_ascii=False)}"
+            )
 
         # Ejecutar request con reintentos (puede lanzar SAI*Error en caso de fallo)
         response, response_headers, auth_method_used = self._execute_request_with_retry(
@@ -1615,17 +1931,30 @@ class SAILLM(CustomLLM):
         usage_data = self._update_usage_data(response_headers)
 
         # Log de respuesta exitosa
-        self._log_successful_response(request_id, response, response_headers, usage_data)
+        self._log_successful_response(
+            request_id, response, response_headers, usage_data
+        )
 
         return response, "stop", usage_data
 
-    def _make_request(self, url: str, data: dict, use_api_key: bool = False, timeout: int = None, request_id: str = "unknown", custom_api_key: Optional[str] = None, custom_cookie: Optional[str] = None) -> tuple[Optional[str], Optional[dict]]:
+    def _make_request(
+        self,
+        url: str,
+        data: dict,
+        use_api_key: bool = False,
+        timeout: int = None,
+        request_id: str = "unknown",
+        custom_api_key: Optional[str] = None,
+        custom_cookie: Optional[str] = None,
+    ) -> tuple[Optional[str], Optional[dict]]:
         resp = None
         request_timeout = timeout or REQUEST_TIMEOUT
 
         try:
             # Configurar headers de autenticación
-            headers_result = self._setup_request_headers(use_api_key, custom_api_key, custom_cookie, request_id)
+            headers_result = self._setup_request_headers(
+                use_api_key, custom_api_key, custom_cookie, request_id
+            )
             if headers_result is None or headers_result[0] is None:
                 return None, None
             headers, auth_method = headers_result
@@ -1635,11 +1964,15 @@ class SAILLM(CustomLLM):
 
             if VERBOSE_LOGGING:
                 logger.debug(f"[{request_id}] [VERBOSE] Request URL: {url}")
-                logger.debug(f"[{request_id}] [VERBOSE] Request headers (sin credenciales): {', '.join(k for k in headers.keys() if k not in ['X-Api-Key', 'Cookie'])}")
+                logger.debug(
+                    f"[{request_id}] [VERBOSE] Request headers (sin credenciales): {', '.join(k for k in headers.keys() if k not in ['X-Api-Key', 'Cookie'])}"
+                )
 
             # Ejecutar petición HTTP
             start_time = time.time()
-            resp = self._execute_http_request(url, data, headers, request_timeout, request_id)
+            resp = self._execute_http_request(
+                url, data, headers, request_timeout, request_id
+            )
             response_time = time.time() - start_time
 
             # Extraer headers de respuesta
@@ -1649,7 +1982,9 @@ class SAILLM(CustomLLM):
 
         except requests.RequestException as e:
             # Traducir y relanzar como excepción de dominio
-            self._handle_request_exceptions(e, resp, auth_method, url, request_timeout, request_id)
+            self._handle_request_exceptions(
+                e, resp, auth_method, url, request_timeout, request_id
+            )
             # La línea siguiente no debería alcanzarse nunca, pero se deja por claridad tipada.
             raise
 
