@@ -17,66 +17,52 @@ from sai_exceptions import (
     SAIUpstreamInvalidResponseError,
 )
 
+
 class ResponsesHandler:
     """Handler para el endpoint /v1/responses con soporte streaming y no streaming."""
 
     def _process_messages(self, messages: list) -> list:
         """
         Procesa mensajes y concatena system prompt adicional.
-        
+
         Args:
             messages: Lista de mensajes originales.
-        
+
         Returns:
             Lista de mensajes procesados con system prompt combinado.
         """
         processed = []
-        
+
         for msg in messages:
             if msg.get("role") == "system":
                 # Concatenar system prompt adicional
                 original_content = msg.get("content", "")
                 merged_content = merge_system_prompts_for_responses(original_content)
-                processed.append({
-                    "role": "system",
-                    "content": merged_content
-                })
+                processed.append({"role": "system", "content": merged_content})
             else:
                 processed.append(msg)
-        
+
         return processed
 
-    async def responses_non_streaming(self, request_id: str, output_item_id: str,
-                                      messages: list, kwargs: dict, model: str):
+    async def responses_non_streaming(
+        self,
+        request_id: str,
+        output_item_id: str,
+        messages: list,
+        kwargs: dict,
+        model: str,
+    ):
         # Procesar mensajes con system prompt adicional
         messages = self._process_messages(messages)
-        
+
         logger.info(f"🚀 [{request_id}] Llamando a sai_llm.acompletion()...")
 
         # Timestamp de inicio
         created_at = int(time.time())
 
-        try:
-            litellm_response = await sai_llm.acompletion(request_id, messages=messages, **kwargs)
-        except SAIUpstreamInvalidResponseError as e:
-            logger.error(
-                f"❌ [{request_id}] Upstream inválido en /v1/responses (non-streaming) | "
-                f"{type(e).__name__}: {str(e)}"
-            )
-            error_body = {
-                "error": {
-                    "message": str(e),
-                    "type": "upstream_invalid_response",
-                    "exception": e.exception_type or type(e).__name__,
-                    "upstream_preview": getattr(e, "upstream_preview", ""),
-                }
-            }
-            return Response(
-                content=json.dumps(error_body, indent=2, ensure_ascii=False) + "\n",
-                status_code=502,
-                media_type="application/json",
-                headers={"Content-Type": "application/json; charset=utf-8"},
-            )
+        litellm_response = await sai_llm.acompletion(
+            request_id, messages=messages, **kwargs
+        )
 
         # Timestamp de finalización
         completed_at = int(time.time())
@@ -85,12 +71,12 @@ class ResponsesHandler:
         text = ""
         tool_calls = None
 
-        if hasattr(litellm_response, 'choices') and litellm_response.choices:
+        if hasattr(litellm_response, "choices") and litellm_response.choices:
             choice = litellm_response.choices[0]
 
             # Extraer tool_calls si existen
-            if hasattr(choice, 'message'):
-                if hasattr(choice.message, 'tool_calls') and choice.message.tool_calls:
+            if hasattr(choice, "message"):
+                if hasattr(choice.message, "tool_calls") and choice.message.tool_calls:
                     tool_calls = choice.message.tool_calls
                     logger.info(
                         f"🔧 [{request_id}] [RESPONSES] Tool calls detectados | "
@@ -98,31 +84,33 @@ class ResponsesHandler:
                     )
 
                 # Extraer content (puede coexistir con tool_calls)
-                if hasattr(choice.message, 'content'):
+                if hasattr(choice.message, "content"):
                     text = choice.message.content or ""
-        elif hasattr(litellm_response, 'text') and litellm_response.text:
+        elif hasattr(litellm_response, "text") and litellm_response.text:
             text = litellm_response.text
 
         # Extraer usage
         usage_dict = {}
-        if hasattr(litellm_response, 'usage'):
+        if hasattr(litellm_response, "usage"):
             usage_obj = litellm_response.usage
             if isinstance(usage_obj, dict):
                 usage_dict = usage_obj
             else:
-                usage_dict = usage_obj.__dict__ if hasattr(usage_obj, '__dict__') else {}
+                usage_dict = (
+                    usage_obj.__dict__ if hasattr(usage_obj, "__dict__") else {}
+                )
 
         # Extraer finish_reason
         finish_reason = "end_turn"
-        if hasattr(litellm_response, 'choices') and litellm_response.choices:
+        if hasattr(litellm_response, "choices") and litellm_response.choices:
             choice = litellm_response.choices[0]
-            if hasattr(choice, 'finish_reason'):
+            if hasattr(choice, "finish_reason"):
                 litellm_finish = choice.finish_reason
                 finish_reason_map = {
                     "stop": "end_turn",
                     "tool_calls": "tool_calls",
                     "length": "max_tokens",
-                    "error": "error"
+                    "error": "error",
                 }
                 finish_reason = finish_reason_map.get(litellm_finish, "end_turn")
 
@@ -132,26 +120,32 @@ class ResponsesHandler:
         if tool_calls:
             # Formato para function_call (compatible con Responses API)
             for tc in tool_calls:
-                if hasattr(tc, '__dict__'):
+                if hasattr(tc, "__dict__"):
                     tc_dict = {
-                        "id": getattr(tc, 'id', f"call_{request_id}"),
-                        "type": getattr(tc, 'type', 'function'),
+                        "id": getattr(tc, "id", f"call_{request_id}"),
+                        "type": getattr(tc, "type", "function"),
                         "function": {
-                            "name": getattr(tc.function, 'name', '') if hasattr(tc, 'function') else '',
-                            "arguments": getattr(tc.function, 'arguments', '{}') if hasattr(tc, 'function') else '{}'
-                        }
+                            "name": getattr(tc.function, "name", "")
+                            if hasattr(tc, "function")
+                            else "",
+                            "arguments": getattr(tc.function, "arguments", "{}")
+                            if hasattr(tc, "function")
+                            else "{}",
+                        },
                     }
                 else:
                     tc_dict = tc
 
-                output.append({
-                    "type": "function_call",
-                    "id": f"fc_{request_id}",
-                    "call_id": tc_dict.get("id"),
-                    "name": tc_dict.get("function", {}).get("name"),
-                    "arguments": tc_dict.get("function", {}).get("arguments"),
-                    "status": "completed"
-                })
+                output.append(
+                    {
+                        "type": "function_call",
+                        "id": f"fc_{request_id}",
+                        "call_id": tc_dict.get("id"),
+                        "name": tc_dict.get("function", {}).get("name"),
+                        "arguments": tc_dict.get("function", {}).get("arguments"),
+                        "status": "completed",
+                    }
+                )
 
             logger.info(
                 f"🔧 [{request_id}] [RESPONSES] Output con function_calls | "
@@ -159,20 +153,22 @@ class ResponsesHandler:
             )
         else:
             # Formato para mensaje de texto normal
-            output.append({
-                "id": output_item_id,
-                "type": "message",
-                "status": "completed",
-                "content": [
-                    {
-                        "type": "output_text",
-                        "annotations": [],
-                        "logprobs": [],
-                        "text": text
-                    }
-                ],
-                "role": "assistant"
-            })
+            output.append(
+                {
+                    "id": output_item_id,
+                    "type": "message",
+                    "status": "completed",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "annotations": [],
+                            "logprobs": [],
+                            "text": text,
+                        }
+                    ],
+                    "role": "assistant",
+                }
+            )
 
         response_id = f"msg_{request_id}"
 
@@ -183,9 +179,7 @@ class ResponsesHandler:
             "created_at": created_at,
             "status": "completed",
             "background": False,
-            "billing": {
-                "payer": "developer"
-            },
+            "billing": {"payer": "developer"},
             "completed_at": completed_at,
             "error": None,
             "frequency_penalty": kwargs.get("frequency_penalty", 0.0),
@@ -200,20 +194,12 @@ class ResponsesHandler:
             "previous_response_id": None,
             "prompt_cache_key": None,
             "prompt_cache_retention": None,
-            "reasoning": {
-                "effort": "none",
-                "summary": None
-            },
+            "reasoning": {"effort": "none", "summary": None},
             "safety_identifier": None,
             "service_tier": "default",
             "store": True,
             "temperature": kwargs.get("temperature", 1.0),
-            "text": {
-                "format": {
-                    "type": "text"
-                },
-                "verbosity": "medium"
-            },
+            "text": {"format": {"type": "text"}, "verbosity": "medium"},
             "tool_choice": kwargs.get("tool_choice", "auto"),
             "tools": kwargs.get("tools", []),
             "top_logprobs": 0,
@@ -221,17 +207,13 @@ class ResponsesHandler:
             "truncation": "disabled",
             "usage": {
                 "input_tokens": usage_dict.get("prompt_tokens", 0),
-                "input_tokens_details": {
-                    "cached_tokens": 0
-                },
+                "input_tokens_details": {"cached_tokens": 0},
                 "output_tokens": usage_dict.get("completion_tokens", 0),
-                "output_tokens_details": {
-                    "reasoning_tokens": 0
-                },
-                "total_tokens": usage_dict.get("total_tokens", 0)
+                "output_tokens_details": {"reasoning_tokens": 0},
+                "total_tokens": usage_dict.get("total_tokens", 0),
             },
             "user": None,
-            "metadata": {}
+            "metadata": {},
         }
 
         logger.info(
@@ -245,14 +227,21 @@ class ResponsesHandler:
         return Response(
             content=json.dumps(response, indent=2, ensure_ascii=False) + "\n",
             media_type="application/json",
-            headers={"Content-Type": "application/json; charset=utf-8"}
+            headers={"Content-Type": "application/json; charset=utf-8"},
         )
 
-    async def responses_streaming(self, request_id: str, output_item_id: str,
-                                  messages: list, kwargs: dict, model: str, has_reasoning=False):
+    async def responses_streaming(
+        self,
+        request_id: str,
+        output_item_id: str,
+        messages: list,
+        kwargs: dict,
+        model: str,
+        has_reasoning=False,
+    ):
         # Procesar mensajes con system prompt adicional
         messages = self._process_messages(messages)
-        
+
         # Generar stream de eventos SSE
         async def event_generator() -> AsyncIterator[str]:
             try:
@@ -261,12 +250,12 @@ class ResponsesHandler:
                 apply_patch_tool = {
                     "description": "Use the `apply_patch` tool to edit files. This is a FREEFORM tool, so do not wrap the patch in JSON.",
                     "format": {
-                        "definition": "start: begin_patch hunk+ end_patch\nbegin_patch: \"*** Begin Patch\" LF\nend_patch: \"*** End Patch\" LF?\n\nhunk: add_hunk | delete_hunk | update_hunk\nadd_hunk: \"*** Add File: \" filename LF add_line+\ndelete_hunk: \"*** Delete File: \" filename LF\nupdate_hunk: \"*** Update File: \" filename LF change_move? change?\n\nfilename: /(.+)/\nadd_line: \"+\" /(.*)/ LF -> line\n\nchange_move: \"*** Move to: \" filename LF\nchange: (change_context | change_line)+ eof_line?\nchange_context: (\"@@\" | \"@@ \" /(.+)/) LF\nchange_line: (\"+\" | \"-\" | \" \") /(.*)/ LF\neof_line: \"*** End of File\" LF\n\n%import common.LF\n",
+                        "definition": 'start: begin_patch hunk+ end_patch\nbegin_patch: "*** Begin Patch" LF\nend_patch: "*** End Patch" LF?\n\nhunk: add_hunk | delete_hunk | update_hunk\nadd_hunk: "*** Add File: " filename LF add_line+\ndelete_hunk: "*** Delete File: " filename LF\nupdate_hunk: "*** Update File: " filename LF change_move? change?\n\nfilename: /(.+)/\nadd_line: "+" /(.*)/ LF -> line\n\nchange_move: "*** Move to: " filename LF\nchange: (change_context | change_line)+ eof_line?\nchange_context: ("@@" | "@@ " /(.+)/) LF\nchange_line: ("+" | "-" | " ") /(.*)/ LF\neof_line: "*** End of File" LF\n\n%import common.LF\n',
                         "syntax": "lark",
-                        "type": "grammar"
+                        "type": "grammar",
                     },
                     "name": "apply_patch",
-                    "type": "custom"
+                    "type": "custom",
                 }
 
                 tools = kwargs.get("tools")
@@ -283,20 +272,28 @@ class ResponsesHandler:
                 # Evitar duplicados: solo agregar si NO existe un tool con name="apply_patch" y type="custom"
                 has_apply_patch_custom = False
                 for t in tools:
-                    if isinstance(t, dict) and t.get("name") == "apply_patch" and t.get("type") == "custom":
+                    if (
+                        isinstance(t, dict)
+                        and t.get("name") == "apply_patch"
+                        and t.get("type") == "custom"
+                    ):
                         has_apply_patch_custom = True
                         break
 
                 if not has_apply_patch_custom:
                     tools.append(apply_patch_tool)
-                    logger.info(f"🧩 [{request_id}] Tool 'apply_patch' agregado a kwargs['tools'] (total={len(tools)})")
+                    logger.info(
+                        f"🧩 [{request_id}] Tool 'apply_patch' agregado a kwargs['tools'] (total={len(tools)})"
+                    )
 
                 # 🔢 Inicializar contador de secuencia
                 sequence_number = 0
 
                 try:
                     # Almacenar el generador en una variable antes de iterar
-                    stream_generator = sai_llm.astreaming(request_id, messages=messages, **kwargs)
+                    stream_generator = sai_llm.astreaming(
+                        request_id, messages=messages, **kwargs
+                    )
 
                     # Variables para tracking
                     chunk_count = 0
@@ -326,7 +323,11 @@ class ResponsesHandler:
                         chunk_count += 1
 
                         # Extraer tool_use del chunk
-                        tool_use = chunk.get('tool_use') if isinstance(chunk, dict) else getattr(chunk, 'tool_use', None)
+                        tool_use = (
+                            chunk.get("tool_use")
+                            if isinstance(chunk, dict)
+                            else getattr(chunk, "tool_use", None)
+                        )
 
                         if chunk_count == 1:
                             logger.warning(f"⏱️ [{request_id}] PRIMER CHUNK recibido")
@@ -334,50 +335,66 @@ class ResponsesHandler:
                             logger.info(f"🌊 [{request_id}] Iniciando streaming SSE...")
 
                             # 🔥 EVENTO CANÓNICO: response.created
-                            response_created = event_builder.build_response_created_event(
-                                response_id=response_id,
-                                created_at=created_at,
-                                kwargs=kwargs,
-                                model=model,
-                                sequence_number=sequence_number
+                            response_created = (
+                                event_builder.build_response_created_event(
+                                    response_id=response_id,
+                                    created_at=created_at,
+                                    kwargs=kwargs,
+                                    model=model,
+                                    sequence_number=sequence_number,
+                                )
                             )
                             sequence_number += 1
                             yield "event: response.created\n"
                             yield f"data: {json.dumps(response_created)}\n\n"
 
                             # 🔥 EVENTO CANÓNICO: response.in_progress
-                            response_in_progress = event_builder.build_response_in_progress_event(
-                                response_id=response_id,
-                                created_at=created_at,
-                                kwargs=kwargs,
-                                model=model,
-                                sequence_number=sequence_number
+                            response_in_progress = (
+                                event_builder.build_response_in_progress_event(
+                                    response_id=response_id,
+                                    created_at=created_at,
+                                    kwargs=kwargs,
+                                    model=model,
+                                    sequence_number=sequence_number,
+                                )
                             )
                             sequence_number += 1
                             yield "event: response.in_progress\n"
                             yield f"data: {json.dumps(response_in_progress)}\n\n"
 
-                            logger.info(f"🚀 [{request_id}] Llamando a sai_llm.astreaming()...")
+                            logger.info(
+                                f"🚀 [{request_id}] Llamando a sai_llm.astreaming()..."
+                            )
 
                             # 🔥 EVENTO CANÓNICO: response.output_item.added (reasoning/message)
                             item_type = "reasoning" if tool_use else "message"
-                            rs_item_id = f"rs_{uuid.uuid4().hex[:50]}" if tool_use else f"msg_{uuid.uuid4().hex[:50]}"
+                            rs_item_id = (
+                                f"rs_{uuid.uuid4().hex[:50]}"
+                                if tool_use
+                                else f"msg_{uuid.uuid4().hex[:50]}"
+                            )
 
-                            response_output_item_added = event_builder.build_response_output_item_added_event(
-                                item_id=rs_item_id if tool_use else f"msg_{uuid.uuid4().hex[:50]}",
-                                item_type="reasoning" if tool_use else "message",
-                                sequence_number=sequence_number
+                            response_output_item_added = (
+                                event_builder.build_response_output_item_added_event(
+                                    item_id=rs_item_id
+                                    if tool_use
+                                    else f"msg_{uuid.uuid4().hex[:50]}",
+                                    item_type="reasoning" if tool_use else "message",
+                                    sequence_number=sequence_number,
+                                )
                             )
                             sequence_number += 1
                             yield "event: response.output_item.added\n"
                             yield f"data: {json.dumps(response_output_item_added)}\n\n"
 
                             if tool_use:
-                                response_output_item_done = event_builder.build_response_output_item_done_event(
-                                    item_id=rs_item_id,
-                                    item_type=item_type,
-                                    text="",
-                                    sequence_number=sequence_number
+                                response_output_item_done = (
+                                    event_builder.build_response_output_item_done_event(
+                                        item_id=rs_item_id,
+                                        item_type=item_type,
+                                        text="",
+                                        sequence_number=sequence_number,
+                                    )
                                 )
                                 sequence_number += 1
                                 yield "event: response.output_item.done\n"
@@ -388,7 +405,7 @@ class ResponsesHandler:
                                     part_type="output_text",
                                     text="",
                                     index=0,
-                                    sequence_number=sequence_number
+                                    sequence_number=sequence_number,
                                 )
                                 sequence_number += 1
                                 yield "event: response.content_part.added\n"
@@ -412,9 +429,13 @@ class ResponsesHandler:
                                 call_id = tc.get("id", f"call_{request_id}_{idx}")
 
                                 args_raw = tc.get("function", {}).get("arguments", "{}")
-                                args = json.dumps(args_raw, ensure_ascii=False) if isinstance(args_raw, dict) else (args_raw or "")
+                                args = (
+                                    json.dumps(args_raw, ensure_ascii=False)
+                                    if isinstance(args_raw, dict)
+                                    else (args_raw or "")
+                                )
 
-                                is_custom = (name == "apply_patch")
+                                is_custom = name == "apply_patch"
                                 fc_id = uuid.uuid4().hex[:50]
                                 item_id = f"fc_{fc_id}"
 
@@ -424,7 +445,7 @@ class ResponsesHandler:
                                     item_type=tc_type,
                                     call_id=call_id,
                                     name=name,
-                                    sequence_number=sequence_number
+                                    sequence_number=sequence_number,
                                 )
                                 sequence_number += 1
                                 yield "event: response.output_item.added\n"
@@ -434,7 +455,7 @@ class ResponsesHandler:
                                 buf = ""
                                 chunk_size = 20
                                 for i in range(0, len(args), chunk_size):
-                                    part = args[i:i + chunk_size]
+                                    part = args[i : i + chunk_size]
                                     buf += part
 
                                     if is_custom:
@@ -442,7 +463,7 @@ class ResponsesHandler:
                                             item_id=item_id,
                                             delta=part,
                                             output_index=0,
-                                            sequence_number=sequence_number
+                                            sequence_number=sequence_number,
                                         )
                                         sequence_number += 1
                                         yield "event: response.custom_tool_call_input.delta\n"
@@ -452,7 +473,7 @@ class ResponsesHandler:
                                             item_id=item_id,
                                             call_id=call_id,
                                             delta=part,
-                                            sequence_number=sequence_number
+                                            sequence_number=sequence_number,
                                         )
                                         sequence_number += 1
                                         yield "event: response.function_call_arguments.delta\n"
@@ -464,7 +485,7 @@ class ResponsesHandler:
                                         item_id=item_id,
                                         input_text=buf,
                                         output_index=0,
-                                        sequence_number=sequence_number
+                                        sequence_number=sequence_number,
                                     )
                                     sequence_number += 1
                                     yield "event: response.custom_tool_call_input.done\n"
@@ -474,7 +495,7 @@ class ResponsesHandler:
                                         arguments=buf,
                                         item_id=item_id,
                                         output_index=0,
-                                        sequence_number=sequence_number
+                                        sequence_number=sequence_number,
                                     )
                                     sequence_number += 1
                                     yield "event: response.function_call_arguments.done\n"
@@ -491,8 +512,8 @@ class ResponsesHandler:
                                             "input": buf,
                                             "call_id": call_id,
                                             "name": name,
-                                            "status": "completed"
-                                        }
+                                            "status": "completed",
+                                        },
                                     )
                                 else:
                                     response_output_item_done = event_builder.build_response_output_item_done_event(
@@ -504,29 +525,35 @@ class ResponsesHandler:
                                             "arguments": buf,
                                             "call_id": call_id,
                                             "name": name,
-                                            "status": "completed"
-                                        }
+                                            "status": "completed",
+                                        },
                                     )
                                 sequence_number += 1
                                 yield "event: response.output_item.done\n"
                                 yield f"data: {json.dumps(response_output_item_done)}\n\n"
 
-                                emitted_tool_items.append({
-                                    "type": tc_type,
-                                    "id": item_id,
-                                    "call_id": call_id,
-                                    "name": name,
-                                    "is_custom": is_custom,
-                                    "arguments": None if is_custom else buf,
-                                    "input": buf if is_custom else None,
-                                })
+                                emitted_tool_items.append(
+                                    {
+                                        "type": tc_type,
+                                        "id": item_id,
+                                        "call_id": call_id,
+                                        "name": name,
+                                        "is_custom": is_custom,
+                                        "arguments": None if is_custom else buf,
+                                        "input": buf if is_custom else None,
+                                    }
+                                )
 
                             function_call_emitted = True
                             finish_reason = "tool_calls"
                             continue
 
                         # Extraer texto del chunk (si no hay tool_calls)
-                        chunk_text = chunk.get('text') if isinstance(chunk, dict) else getattr(chunk, 'text', None)
+                        chunk_text = (
+                            chunk.get("text")
+                            if isinstance(chunk, dict)
+                            else getattr(chunk, "text", None)
+                        )
 
                         if VERBOSE_LOGGING:
                             logger.debug(
@@ -538,17 +565,23 @@ class ResponsesHandler:
                         if chunk_text and not tool_use:
                             total_text += chunk_text
 
-                            response_output_text_delta = event_builder.build_response_output_text_delta_event(
-                                item_id=output_item_id,
-                                delta=chunk_text,
-                                sequence_number=sequence_number
+                            response_output_text_delta = (
+                                event_builder.build_response_output_text_delta_event(
+                                    item_id=output_item_id,
+                                    delta=chunk_text,
+                                    sequence_number=sequence_number,
+                                )
                             )
                             sequence_number += 1
                             yield "event: response.output_text.delta\n"
                             yield f"data: {json.dumps(response_output_text_delta)}\n\n"
 
                         # Extraer usage del chunk
-                        usage = chunk.get('usage') if isinstance(chunk, dict) else getattr(chunk, 'usage', None)
+                        usage = (
+                            chunk.get("usage")
+                            if isinstance(chunk, dict)
+                            else getattr(chunk, "usage", None)
+                        )
                         if usage:
                             if isinstance(usage, dict):
                                 if usage.get("prompt_tokens", 0) > 0:
@@ -559,17 +592,25 @@ class ResponsesHandler:
                                 if getattr(usage, "prompt_tokens", 0) > 0:
                                     input_tokens = getattr(usage, "prompt_tokens", 0)
                                 if getattr(usage, "completion_tokens", 0) > 0:
-                                    output_tokens = getattr(usage, "completion_tokens", 0)
+                                    output_tokens = getattr(
+                                        usage, "completion_tokens", 0
+                                    )
 
                         # Extraer finish_reason
-                        chunk_finish_reason = chunk.get('finish_reason') if isinstance(chunk, dict) else getattr(chunk, 'finish_reason', None)
+                        chunk_finish_reason = (
+                            chunk.get("finish_reason")
+                            if isinstance(chunk, dict)
+                            else getattr(chunk, "finish_reason", None)
+                        )
                         if chunk_finish_reason and not function_call_emitted:
                             finish_reason_map = {
                                 "stop": "end_turn",
                                 "length": "max_tokens",
-                                "error": "error"
+                                "error": "error",
                             }
-                            finish_reason = finish_reason_map.get(chunk_finish_reason, "end_turn")
+                            finish_reason = finish_reason_map.get(
+                                chunk_finish_reason, "end_turn"
+                            )
 
                 except Exception as stream_error:
                     logger.error(
@@ -580,8 +621,8 @@ class ResponsesHandler:
                         "type": "error",
                         "error": {
                             "type": "internal_error",
-                            "message": str(stream_error)
-                        }
+                            "message": str(stream_error),
+                        },
                     }
                     yield f"event: error\n"
                     yield f"data: {json.dumps(error_event)}\n\n"
@@ -597,8 +638,10 @@ class ResponsesHandler:
                 # 🛡️ FALLBACK: si el modelo mezcló texto + JSON de tool_calls,
                 # extraer los tool_calls del texto acumulado y emitir eventos estructurados.
                 if total_text and not tool_use and not function_call_emitted:
-                    fallback_tool_calls, cleaned_total = sai_llm._extract_tool_calls_from_plain_text_end(
-                        total_text, request_id
+                    fallback_tool_calls, cleaned_total = (
+                        sai_llm._extract_tool_calls_from_plain_text_end(
+                            total_text, request_id, "responses"
+                        )
                     )
                     if fallback_tool_calls:
                         logger.info(
@@ -616,22 +659,33 @@ class ResponsesHandler:
                                 continue
 
                             tc_type = tc.get("type", "function_call")
-                            name = tc.get("function", {}).get("name") or tc.get("name", "")
+                            name = tc.get("function", {}).get("name") or tc.get(
+                                "name", ""
+                            )
                             call_id = tc.get("id", f"call_{request_id}_{idx}")
-                            args_raw = tc.get("function", {}).get("arguments", "{}") if tc.get("function") else tc.get("arguments",
-                                                                                                                   "{}")
-                            args = json.dumps(args_raw, ensure_ascii=False) if isinstance(args_raw, dict) else (args_raw or "")
+                            args_raw = (
+                                tc.get("function", {}).get("arguments", "{}")
+                                if tc.get("function")
+                                else tc.get("arguments", "{}")
+                            )
+                            args = (
+                                json.dumps(args_raw, ensure_ascii=False)
+                                if isinstance(args_raw, dict)
+                                else (args_raw or "")
+                            )
 
-                            is_custom = (name == "apply_patch")
+                            is_custom = name == "apply_patch"
                             fc_id = uuid.uuid4().hex[:50]
                             item_id = f"fc_{fc_id}"
 
-                            response_output_item_added = event_builder.build_response_output_item_added_event(
-                                item_id=item_id,
-                                item_type=tc_type,
-                                call_id=call_id,
-                                name=name,
-                                sequence_number=sequence_number
+                            response_output_item_added = (
+                                event_builder.build_response_output_item_added_event(
+                                    item_id=item_id,
+                                    item_type=tc_type,
+                                    call_id=call_id,
+                                    name=name,
+                                    sequence_number=sequence_number,
+                                )
                             )
                             sequence_number += 1
                             yield "event: response.output_item.added\n"
@@ -640,14 +694,14 @@ class ResponsesHandler:
                             chunk_size = 20
                             buf = ""
                             for i in range(0, len(args), chunk_size):
-                                part = args[i:i + chunk_size]
+                                part = args[i : i + chunk_size]
                                 buf += part
                                 if is_custom:
                                     delta_event = event_builder.build_response_custom_tool_call_input_delta_event(
                                         item_id=item_id,
                                         delta=part,
                                         output_index=0,
-                                        sequence_number=sequence_number
+                                        sequence_number=sequence_number,
                                     )
                                     sequence_number += 1
                                     yield "event: response.custom_tool_call_input.delta\n"
@@ -657,7 +711,7 @@ class ResponsesHandler:
                                         item_id=item_id,
                                         call_id=call_id,
                                         delta=part,
-                                        sequence_number=sequence_number
+                                        sequence_number=sequence_number,
                                     )
                                     sequence_number += 1
                                     yield "event: response.function_call_arguments.delta\n"
@@ -668,7 +722,7 @@ class ResponsesHandler:
                                     item_id=item_id,
                                     input_text=buf,
                                     output_index=0,
-                                    sequence_number=sequence_number
+                                    sequence_number=sequence_number,
                                 )
                                 sequence_number += 1
                                 yield "event: response.custom_tool_call_input.done\n"
@@ -678,51 +732,57 @@ class ResponsesHandler:
                                     arguments=buf,
                                     item_id=item_id,
                                     output_index=0,
-                                    sequence_number=sequence_number
+                                    sequence_number=sequence_number,
                                 )
                                 sequence_number += 1
                                 yield "event: response.function_call_arguments.done\n"
                                 yield f"data: {json.dumps(done_event)}\n\n"
 
                             if is_custom:
-                                item_done_event = event_builder.build_response_output_item_done_event(
-                                    item_id=item_id,
-                                    item_type=tc_type,
-                                    output_index=0,
-                                    sequence_number=sequence_number,
-                                    custom_tool_call_data={
-                                        "input": buf,
-                                        "call_id": call_id,
-                                        "name": name,
-                                        "status": "completed"
-                                    }
+                                item_done_event = (
+                                    event_builder.build_response_output_item_done_event(
+                                        item_id=item_id,
+                                        item_type=tc_type,
+                                        output_index=0,
+                                        sequence_number=sequence_number,
+                                        custom_tool_call_data={
+                                            "input": buf,
+                                            "call_id": call_id,
+                                            "name": name,
+                                            "status": "completed",
+                                        },
+                                    )
                                 )
                             else:
-                                item_done_event = event_builder.build_response_output_item_done_event(
-                                    item_id=item_id,
-                                    item_type=tc_type,
-                                    output_index=0,
-                                    sequence_number=sequence_number,
-                                    function_call_data={
-                                        "arguments": buf,
-                                        "call_id": call_id,
-                                        "name": name,
-                                        "status": "completed"
-                                    }
+                                item_done_event = (
+                                    event_builder.build_response_output_item_done_event(
+                                        item_id=item_id,
+                                        item_type=tc_type,
+                                        output_index=0,
+                                        sequence_number=sequence_number,
+                                        function_call_data={
+                                            "arguments": buf,
+                                            "call_id": call_id,
+                                            "name": name,
+                                            "status": "completed",
+                                        },
+                                    )
                                 )
                             sequence_number += 1
                             yield "event: response.output_item.done\n"
                             yield f"data: {json.dumps(item_done_event)}\n\n"
 
-                            emitted_tool_items.append({
-                                "type": tc_type,
-                                "id": item_id,
-                                "call_id": call_id,
-                                "name": name,
-                                "is_custom": is_custom,
-                                "arguments": None if is_custom else buf,
-                                "input": buf if is_custom else None,
-                            })
+                            emitted_tool_items.append(
+                                {
+                                    "type": tc_type,
+                                    "id": item_id,
+                                    "call_id": call_id,
+                                    "name": name,
+                                    "is_custom": is_custom,
+                                    "arguments": None if is_custom else buf,
+                                    "input": buf if is_custom else None,
+                                }
+                            )
 
                 # 🔥 EVENTO CANÓNICO: response.output_text.done (solo si hay texto)
                 if total_text:
@@ -733,7 +793,7 @@ class ResponsesHandler:
                                 item_id=f"fc_{fc_item_id}",
                                 input_text=custom_tool_input_buffer,
                                 output_index=1,
-                                sequence_number=sequence_number
+                                sequence_number=sequence_number,
                             )
                             sequence_number += 1
                             yield "event: response.custom_tool_call_input.done\n"
@@ -743,27 +803,31 @@ class ResponsesHandler:
                                 arguments=total_text,
                                 item_id=f"fc_{fc_item_id}",
                                 output_index=1,
-                                sequence_number=sequence_number
+                                sequence_number=sequence_number,
                             )
                             sequence_number += 1
                             yield "event: response.function_call_arguments.done\n"
                             yield f"data: {json.dumps(response_function_call_arguments_done)}\n\n"
                     else:
-                        response_output_text_done = event_builder.build_response_output_text_done_event(
-                            item_id=output_item_id,
-                            text=total_text,
-                            sequence_number=sequence_number
+                        response_output_text_done = (
+                            event_builder.build_response_output_text_done_event(
+                                item_id=output_item_id,
+                                text=total_text,
+                                sequence_number=sequence_number,
+                            )
                         )
                         sequence_number += 1
                         yield "event: response.output_text.done\n"
                         yield f"data: {json.dumps(response_output_text_done)}\n\n"
 
                         # 🔥 EVENTO CANÓNICO: response.content_part.done
-                        response_content_part_done = event_builder.build_response_content_part_done_event(
-                            item_id=output_item_id,
-                            text=total_text,
-                            index=0,
-                            sequence_number=sequence_number
+                        response_content_part_done = (
+                            event_builder.build_response_content_part_done_event(
+                                item_id=output_item_id,
+                                text=total_text,
+                                index=0,
+                                sequence_number=sequence_number,
+                            )
                         )
                         sequence_number += 1
                         yield "event: response.content_part.done\n"
@@ -776,23 +840,27 @@ class ResponsesHandler:
                     output = []
                     for it in emitted_tool_items:
                         if it["is_custom"]:
-                            output.append({
-                                "type": it["type"],
-                                "id": it["id"],
-                                "call_id": it["call_id"],
-                                "name": it["name"],
-                                "input": it["input"] or "",
-                                "status": "completed"
-                            })
+                            output.append(
+                                {
+                                    "type": it["type"],
+                                    "id": it["id"],
+                                    "call_id": it["call_id"],
+                                    "name": it["name"],
+                                    "input": it["input"] or "",
+                                    "status": "completed",
+                                }
+                            )
                         else:
-                            output.append({
-                                "type": it["type"],
-                                "id": it["id"],
-                                "call_id": it["call_id"],
-                                "name": it["name"],
-                                "arguments": it["arguments"] or "",
-                                "status": "completed"
-                            })
+                            output.append(
+                                {
+                                    "type": it["type"],
+                                    "id": it["id"],
+                                    "call_id": it["call_id"],
+                                    "name": it["name"],
+                                    "arguments": it["arguments"] or "",
+                                    "status": "completed",
+                                }
+                            )
 
                     response_completed = event_builder.build_response_completed_event(
                         response_id=response_id,
@@ -803,7 +871,7 @@ class ResponsesHandler:
                         output=output,
                         input_tokens=input_tokens,
                         output_tokens=output_tokens,
-                        sequence_number=sequence_number
+                        sequence_number=sequence_number,
                     )
                     sequence_number += 1
                     yield "event: response.completed\n"
@@ -817,16 +885,18 @@ class ResponsesHandler:
                             "call_id": f"call_{request_id}",
                             "name": function_name,
                             "arguments": function_arguments_buffer,
-                            "status": "completed"
+                            "status": "completed",
                         }
 
-                    response_output_item_done = event_builder.build_response_output_item_done_event(
-                        item_id=output_item_id,
-                        item_type="message",
-                        text=total_text,
-                        output_index=0,
-                        sequence_number=sequence_number,
-                        function_call_data=function_call_data
+                    response_output_item_done = (
+                        event_builder.build_response_output_item_done_event(
+                            item_id=output_item_id,
+                            item_type="message",
+                            text=total_text,
+                            output_index=0,
+                            sequence_number=sequence_number,
+                            function_call_data=function_call_data,
+                        )
                     )
                     sequence_number += 1
                     yield "event: response.output_item.done\n"
@@ -841,30 +911,34 @@ class ResponsesHandler:
 
                     if function_call_emitted and function_name:
                         # Formato para function_call
-                        output.append({
-                            "type": item_type,
-                            "id": f"fc_{request_id}",
-                            "call_id": f"call_{request_id}",
-                            "name": function_name,
-                            "arguments": function_arguments_buffer,
-                            "status": "completed"
-                        })
+                        output.append(
+                            {
+                                "type": item_type,
+                                "id": f"fc_{request_id}",
+                                "call_id": f"call_{request_id}",
+                                "name": function_name,
+                                "arguments": function_arguments_buffer,
+                                "status": "completed",
+                            }
+                        )
                     else:
                         # Formato para mensaje de texto normal
-                        output.append({
-                            "id": output_item_id,
-                            "type": "message",
-                            "status": "completed",
-                            "content": [
-                                {
-                                    "type": "output_text",
-                                    "annotations": [],
-                                    "logprobs": [],
-                                    "text": total_text
-                                }
-                            ],
-                            "role": "assistant"
-                        })
+                        output.append(
+                            {
+                                "id": output_item_id,
+                                "type": "message",
+                                "status": "completed",
+                                "content": [
+                                    {
+                                        "type": "output_text",
+                                        "annotations": [],
+                                        "logprobs": [],
+                                        "text": total_text,
+                                    }
+                                ],
+                                "role": "assistant",
+                            }
+                        )
 
                     response_completed = event_builder.build_response_completed_event(
                         response_id=response_id,
@@ -875,7 +949,7 @@ class ResponsesHandler:
                         output=output,
                         input_tokens=input_tokens,
                         output_tokens=output_tokens,
-                        sequence_number=sequence_number
+                        sequence_number=sequence_number,
                     )
                     sequence_number += 1
                     yield "event: response.completed\n"
@@ -891,13 +965,12 @@ class ResponsesHandler:
                 return
 
             except SAIAuthenticationError as e:
-                logger.error(f"🔐 [{request_id}] Autenticación fallida en streaming responses: {e}")
+                logger.error(
+                    f"🔐 [{request_id}] Autenticación fallida en streaming responses: {e}"
+                )
                 error_event = {
                     "type": "error",
-                    "error": {
-                        "type": "authentication_error",
-                        "message": str(e)
-                    }
+                    "error": {"type": "authentication_error", "message": str(e)},
                 }
                 yield f"event: error\n"
                 yield f"data: {json.dumps(error_event)}\n\n"
@@ -905,21 +978,17 @@ class ResponsesHandler:
                 logger.error(f"⚠️ [{request_id}] Rate limit en streaming responses: {e}")
                 error_event = {
                     "type": "error",
-                    "error": {
-                        "type": "rate_limit_error",
-                        "message": str(e)
-                    }
+                    "error": {"type": "rate_limit_error", "message": str(e)},
                 }
                 yield f"event: error\n"
                 yield f"data: {json.dumps(error_event)}\n\n"
             except SAIPromptTooLongError as e:
-                logger.error(f"⚠️ [{request_id}] Prompt demasiado largo en streaming responses: {e}")
+                logger.error(
+                    f"⚠️ [{request_id}] Prompt demasiado largo en streaming responses: {e}"
+                )
                 error_event = {
                     "type": "error",
-                    "error": {
-                        "type": "prompt_too_long",
-                        "message": str(e)
-                    }
+                    "error": {"type": "prompt_too_long", "message": str(e)},
                 }
                 yield f"event: error\n"
                 yield f"data: {json.dumps(error_event)}\n\n"
@@ -927,22 +996,18 @@ class ResponsesHandler:
                 logger.error(f"❌ [{request_id}] Error SAI en streaming responses: {e}")
                 error_event = {
                     "type": "error",
-                    "error": {
-                        "type": "sai_error",
-                        "message": str(e)
-                    }
+                    "error": {"type": "sai_error", "message": str(e)},
                 }
                 yield f"event: error\n"
                 yield f"data: {json.dumps(error_event)}\n\n"
             except Exception as e:
-                logger.error(f"❌ [{request_id}] Error en streaming: {type(e).__name__}: {str(e)}")
+                logger.error(
+                    f"❌ [{request_id}] Error en streaming: {type(e).__name__}: {str(e)}"
+                )
                 # Enviar evento de error genérico
                 error_event = {
                     "type": "error",
-                    "error": {
-                        "type": "internal_error",
-                        "message": str(e)
-                    }
+                    "error": {"type": "internal_error", "message": str(e)},
                 }
                 yield f"event: error\n"
                 yield f"data: {json.dumps(error_event)}\n\n"
@@ -954,8 +1019,8 @@ class ResponsesHandler:
                 "Cache-Control": "no-cache",
                 "Connection": "keep-alive",
                 "X-Accel-Buffering": "no",
-                "Content-Type": "text/event-stream; charset=utf-8"
-            }
+                "Content-Type": "text/event-stream; charset=utf-8",
+            },
         )
 
 
