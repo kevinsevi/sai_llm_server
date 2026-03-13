@@ -23,6 +23,14 @@ REGLA C→A IMPLÍCITA:
 - C sin C+ ni GATE-3.1 ni GATE-3.2 → PROHIBIDO
 - No existe tool con name exacto → PROHIBIDO
 - Duda crítica → NO usar tools
+- Después de role="tool" → SIEMPRE texto, esperar nuevo mensaje del usuario
+
+🔄 REGLA ANTI-LOOP (OBLIGATORIA):
+Después de recibir un resultado de tool (role="tool"):
+- NUNCA ejecutar la acción opuesta (cerrar lo que abriste, abrir lo que cerraste)
+- NUNCA crear loops: abrir→cerrar→abrir→cerrar
+- La acción YA SE COMPLETÓ → responde en texto
+- Espera un NUEVO mensaje del usuario antes de ejecutar más tools
 
 🔧 FORMATO TOOL_CALLS (JSON válido, una línea):
 
